@@ -1,0 +1,42 @@
+{
+  "name": "eduzyra-backend",
+  "version": "0.1.0",
+  "description": "Backend API for Eduzyra by Althexus — auth, courses, enrollment, payments (Razorpay), certificates, coupons.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "dev": "nodemon server.js",
+    "start": "node server.js",
+    "start:prod": "pm2 start ecosystem.config.cjs --env production",
+    "seed": "node src/data/seedRunner.js",
+    "test:live": "node test-live-sessions-inmem.mjs",
+    "mem": "node server-mem.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cloudinary": "^2.4.0",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-mongo-sanitize": "^2.2.0",
+    "express-rate-limit": "^8.6.1",
+    "helmet": "^8.3.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.5.0",
+    "morgan": "^1.10.0",
+    "multer": "^1.4.5-lts.1",
+    "nodemailer": "^6.9.14",
+    "razorpay": "^2.9.4",
+    "sharp": "^0.33.5",
+    "winston": "^3.13.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "^10.4.3",
+    "nodemon": "^3.1.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
