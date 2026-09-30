@@ -1,8 +1,8 @@
 
 import 'dotenv/config'
-import { connectDB } from './src/config/db.js'
-import User from './src/models/User.js'
-import Enrollment from './src/models/Enrollment.js'
+import { connectDB } from '../src/config/db.js'
+import User from '../src/models/User.js'
+import Enrollment from '../src/models/Enrollment.js'
 
 async function run() {
   await connectDB()
@@ -21,3 +21,4 @@ async function run() {
   process.exit(0)
 }
 run().catch(err => { console.error(err); process.exit(1) })
+

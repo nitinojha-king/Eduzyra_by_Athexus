@@ -1,16 +1,28 @@
 {
   "name": "eduzyra-backend",
-  "version": "0.1.0",
-  "description": "Backend API for Eduzyra by Althexus — auth, courses, enrollment, payments (Razorpay), certificates, coupons.",
+  "version": "0.2.0",
+  "description": "Backend API for Eduzyra by Althexus — auth (JWT + OTP), courses, lessons, enrollment, payments (Razorpay), certificates, coupons, live classes/sessions, feedback, notifications.",
+  "license": "MIT",
+  "author": "Althexus",
   "type": "module",
   "main": "server.js",
+  "keywords": ["express", "mongodb", "mongoose", "jwt", "razorpay", "e-learning"],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "dev": "nodemon server.js",
+    "dev:mem": "node scripts/dev-mem.js",
     "start": "node server.js",
     "start:prod": "pm2 start ecosystem.config.cjs --env production",
     "seed": "node src/data/seedRunner.js",
-    "test:live": "node test-live-sessions-inmem.mjs",
-    "mem": "node server-mem.js"
+    "migrate:verify-users": "node scripts/migrate-verify-existing-users.mjs",
+    "diag:db": "node scripts/diag-db.mjs",
+    "clean:courses": "node scripts/cleanup-courses.mjs",
+    "test": "node tests/test-cors.mjs",
+    "test:cors": "node tests/test-cors.mjs",
+    "test:live": "node tests/test-live-sessions-inmem.mjs",
+    "test:certificates": "node tests/test-certificate-generation-inmem.mjs"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -35,8 +47,5 @@
   "devDependencies": {
     "mongodb-memory-server": "^10.4.3",
     "nodemon": "^3.1.4"
-  },
-  "engines": {
-    "node": ">=18"
   }
 }

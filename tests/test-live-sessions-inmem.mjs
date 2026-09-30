@@ -2,11 +2,11 @@ import 'dotenv/config'
 import assert from 'node:assert/strict'
 import { MongoMemoryServer } from 'mongodb-memory-server'
 import mongoose from 'mongoose'
-import User from './src/models/User.js'
-import Course from './src/models/Course.js'
-import Enrollment from './src/models/Enrollment.js'
-import LiveClass from './src/models/LiveClass.js'
-import { liveSessionSchema } from './src/validators/index.js'
+import User from '../src/models/User.js'
+import Course from '../src/models/Course.js'
+import Enrollment from '../src/models/Enrollment.js'
+import LiveClass from '../src/models/LiveClass.js'
+import { liveSessionSchema } from '../src/validators/index.js'
 import {
   createLiveSession,
   listLiveSessions,
@@ -15,7 +15,7 @@ import {
   deleteLiveSession,
   deriveStatus,
   toLiveSessionJSON,
-} from './src/controllers/liveSessionController.js'
+} from '../src/controllers/liveSessionController.js'
 
 const GOOD_MEET = 'https://meet.google.com/abc-defg-hij'
 
@@ -182,3 +182,4 @@ try {
   await mongoose.disconnect().catch(() => {})
   await mongoServer?.stop().catch(() => {})
 }
+

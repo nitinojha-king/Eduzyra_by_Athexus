@@ -1,0 +1,14 @@
+node_modules/
+npm-debug.log*
+.env
+.env.*.local
+*.log
+logs/
+coverage/
+.git/
+.github/
+.vscode/
+.idea/
+uploads/
+tmp/
+dist/

@@ -1,9 +1,9 @@
 import 'dotenv/config'
-import { connectDB } from './src/config/db.js'
-import User from './src/models/User.js'
-import Course from './src/models/Course.js'
-import Enrollment from './src/models/Enrollment.js'
-import Certificate from './src/models/Certificate.js'
+import { connectDB } from '../src/config/db.js'
+import User from '../src/models/User.js'
+import Course from '../src/models/Course.js'
+import Enrollment from '../src/models/Enrollment.js'
+import Certificate from '../src/models/Certificate.js'
 import mongoose from 'mongoose'
 
 /**
@@ -149,3 +149,4 @@ async function testCertificateGeneration() {
 
 // Run the test
 testCertificateGeneration()
+

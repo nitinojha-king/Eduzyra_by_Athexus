@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.png binary
+*.jpg binary
+*.pdf binary

@@ -1,12 +1,12 @@
 
 import 'dotenv/config'
-import { connectDB } from './src/config/db.js'
-import Certificate from './src/models/Certificate.js'
-import Course from './src/models/Course.js'
-import Enrollment from './src/models/Enrollment.js'
-import Lesson from './src/models/Lesson.js'
-import Notification from './src/models/Notification.js'
-import Order from './src/models/Order.js'
+import { connectDB } from '../src/config/db.js'
+import Certificate from '../src/models/Certificate.js'
+import Course from '../src/models/Course.js'
+import Enrollment from '../src/models/Enrollment.js'
+import Lesson from '../src/models/Lesson.js'
+import Notification from '../src/models/Notification.js'
+import Order from '../src/models/Order.js'
 
 async function run() {
   await connectDB()
@@ -59,3 +59,4 @@ run().catch((err) => {
   console.error('Cleanup failed:', err)
   process.exit(1)
 })
+

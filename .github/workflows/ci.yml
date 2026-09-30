@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install (incl. Sharp native build deps)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvips-dev
+          npm ci
+
+      - name: Verify Sharp loads
+        run: node -e "import('sharp').then(m => console.log('Sharp OK')).catch(e => { console.error(e.message); process.exit(1) })"
+
+      - name: CORS smoke test (no DB required)
+        run: npm run test:cors
+
+      - name: Live-session smoke test (mongodb-memory-server)
+        run: npm run test:live
+
+      - name: Certificate smoke test (mongodb-memory-server)
+        run: npm run test:certificates
+
+      - name: Docker build check
+        run: docker build -t eduzyra-backend:ci .

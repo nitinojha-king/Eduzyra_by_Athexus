@@ -4,10 +4,10 @@
 // out. Run this once after deploying the OTP change to grandfather in
 // every pre-existing account as verified.
 //
-// Usage: node migrate-verify-existing-users.mjs
+// Usage: node scripts/migrate-verify-existing-users.mjs
 import 'dotenv/config'
-import { connectDB } from './src/config/db.js'
-import User from './src/models/User.js'
+import { connectDB } from '../src/config/db.js'
+import User from '../src/models/User.js'
 
 async function run() {
   await connectDB()
@@ -20,3 +20,4 @@ async function run() {
   process.exit(0)
 }
 run().catch((err) => { console.error(err); process.exit(1) })
+

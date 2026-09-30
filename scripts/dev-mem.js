@@ -1,15 +1,15 @@
 import 'dotenv/config'
 import { MongoMemoryReplSet } from 'mongodb-memory-server'
-import { connectDB } from './src/config/db.js'
-import app from './src/app.js'
-import Course from './src/models/Course.js'
-import Coupon from './src/models/Coupon.js'
-import User from './src/models/User.js'
-import { COURSES_SEED } from './src/data/coursesSeed.js'
-import { COUPONS_SEED } from './src/data/couponsSeed.js'
+import { connectDB } from '../src/config/db.js'
+import app from '../src/app.js'
+import Course from '../src/models/Course.js'
+import Coupon from '../src/models/Coupon.js'
+import User from '../src/models/User.js'
+import { COURSES_SEED } from '../src/data/coursesSeed.js'
+import { COUPONS_SEED } from '../src/data/couponsSeed.js'
 import fs from 'node:fs'
 
-const LOG_PATH = new URL('./_backend_startup.log', import.meta.url).pathname.replace(/^\/([A-Z]:\/)/, '$1')
+const LOG_PATH = new URL('../_backend_startup.log', import.meta.url).pathname.replace(/^\/([A-Z]:\/)/, '$1')
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}`
   console.log(msg)
@@ -67,3 +67,4 @@ async function start() {
 }
 
 start()
+
