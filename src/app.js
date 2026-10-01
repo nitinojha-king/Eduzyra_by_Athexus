@@ -23,15 +23,79 @@ import logger from './utils/logger.js'
 
 const app = express()
 
+// Trust proxy for reverse proxies on Render/Cloudflare so rate limiting and protocol detection work
+app.set('trust proxy', 1)
+
+// ── Secure CORS ───────────────────────────────────────────────────────────
+// Support origins configured via CLIENT_ORIGIN (comma-separated), as well as
+// common deployment domains, localhost, and any *.onrender.com frontend deployment.
+const configuredOrigins = (process.env.CLIENT_ORIGIN || '')
+  .split(',')
+  .map((s) => s.trim().replace(/\/+$/, ''))
+  .filter(Boolean)
+
+const defaultAllowedOrigins = [
+  'https://frontend-final.onrender.com',
+  'https://fontend-final.onrender.com',
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://localhost:5000',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:3000',
+]
+
+const allowedOrigins = Array.from(new Set([...configuredOrigins, ...defaultAllowedOrigins]))
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow non-browser requests (curl, Postman, server-to-server) where origin is undefined
+    if (!origin) {
+      return callback(null, true)
+    }
+
+    const normalizedOrigin = origin.trim().replace(/\/+$/, '')
+
+    if (allowedOrigins.includes(normalizedOrigin)) {
+      return callback(null, true)
+    }
+
+    // Allow all *.onrender.com origins (handles previews, typos, and frontend instances)
+    if (/^https:\/\/.*\.onrender\.com$/.test(normalizedOrigin)) {
+      return callback(null, true)
+    }
+
+    // Standard rejection without throwing unhandled error to error handler
+    callback(null, false)
+  },
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  credentials: true,
+  optionsSuccessStatus: 204,
+}
+
+// Global CORS MUST be mounted before Helmet, rate limiters, body parsers, and routes
+app.use(cors(corsOptions))
+app.options('*', cors(corsOptions))
+
 // Security headers
 app.use(helmet({
   contentSecurityPolicy: process.env.NODE_ENV === 'production' ? undefined : false,
   crossOriginEmbedderPolicy: false,
 }))
 
-// Rate limiting
-const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, message: { message: 'Too many auth attempts, please try again later.' } })
-const apiLimiter = rateLimit({ windowMs: 1 * 60 * 1000, max: 100, message: { message: 'Too many requests, please try again later.' } })
+// Rate limiting (configured with skip on OPTIONS so preflight requests are never blocked)
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  message: { message: 'Too many auth attempts, please try again later.' },
+  skip: (req) => req.method === 'OPTIONS',
+})
+const apiLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max: 120,
+  message: { message: 'Too many requests, please try again later.' },
+  skip: (req) => req.method === 'OPTIONS',
+})
 app.use('/api/auth/login', authLimiter)
 app.use('/api/auth/signup', authLimiter)
 app.use('/api/auth/forgot-password', authLimiter)
@@ -39,39 +103,21 @@ app.use('/api/auth/verify-otp', rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 30,
   message: { message: 'Too many verification attempts, please try again later.' },
+  skip: (req) => req.method === 'OPTIONS',
 }))
 app.use('/api/auth/resend-otp', rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10,
+  max: 20,
   message: { message: 'Too many code requests, please try again later.' },
+  skip: (req) => req.method === 'OPTIONS',
 }))
 app.use('/api/auth/contact', rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 5,
+  max: 10,
   message: { message: 'Too many contact form submissions. Please try again later.' },
+  skip: (req) => req.method === 'OPTIONS',
 }))
 app.use('/api', apiLimiter)
-
-// ── Secure CORS ───────────────────────────────────────────────────────────
-// Replace the insecure `origin: '*'` fallback with an explicit allowlist.
-// CLIENT_ORIGIN is a comma-separated list of allowed origins. In production,
-// set it to the frontend domain (e.g., https://eduzyra.example.com). For
-// multiple origins, comma-separate them: https://a.com,https://b.com
-const allowedOrigins = (process.env.CLIENT_ORIGIN || 'http://localhost:5173')
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean)
-
-app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no Origin header (curl, Postman, server-to-server)
-    if (!origin || allowedOrigins.includes(origin)) {
-      return callback(null, true)
-    }
-    callback(new Error('Not allowed by CORS'))
-  },
-  credentials: true,
-}))
 
 // Cookie parser (added in Phase 7 — required if we ever switch to cookie-based auth)
 app.use(cookieParser())

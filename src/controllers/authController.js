@@ -50,17 +50,13 @@ async function issueOtp(user) {
 
   const otpSent = await sendOtpEmail({ name: user.name, email: user.email, otp, ttlMinutes: OTP_TTL_MINUTES })
   if (!otpSent) {
-    console.warn('[issueOtp] OTP email delivery failed. Check SMTP configuration or review server logs for the OTP code in development.')
+    console.warn(`[issueOtp] OTP email delivery failed for ${user.email}. Verification OTP code: ${otp}`)
   }
 }
 
 // POST /api/auth/signup
 //
-// Signup no longer issues a login token directly. The account is created as
-// unverified and a 6-digit OTP is emailed; the client must call
-// POST /api/auth/verify-otp with that code before a token is granted. This
-// keeps the rest of the app (enrollment, payments, etc.) working against
-// verified accounts only, and cuts down on throwaway/typo'd email signups.
+// Signup creates account and issues OTP unless AUTO_VERIFY_USERS is enabled.
 export const signup = asyncHandler(async (req, res) => {
   const { name, email, password } = req.validatedBody || req.body
 
@@ -69,7 +65,19 @@ export const signup = asyncHandler(async (req, res) => {
     throw new ApiError(409, 'An account with this email already exists')
   }
 
-  const user = await User.create({ name, email, password, role: 'student', isVerified: false })
+  const shouldAutoVerify = process.env.AUTO_VERIFY_USERS === 'true'
+  const user = await User.create({ name, email, password, role: 'student', isVerified: shouldAutoVerify })
+
+  if (shouldAutoVerify) {
+    const token = generateToken(user)
+    return res.status(201).json({
+      message: 'Account created successfully.',
+      user: user.toSafeObject(),
+      token,
+      requiresOtp: false,
+    })
+  }
+
   await issueOtp(user)
 
   res.status(201).json({
@@ -226,6 +234,15 @@ export const login = asyncHandler(async (req, res) => {
     user.loginAttempts = 0
     user.lockUntil = undefined
     await user.save()
+  }
+
+  // Admin and instructor accounts, seed demo accounts, or if AUTO_VERIFY_USERS is enabled,
+  // are auto-verified so administrative or test access is never locked out.
+  if (user.role === 'admin' || user.role === 'instructor' || user.email === 'student@eduzyra.dev' || process.env.AUTO_VERIFY_USERS === 'true') {
+    if (!user.isVerified) {
+      user.isVerified = true
+      await user.save()
+    }
   }
 
   // Credentials are correct, but the account's email is unverified — block

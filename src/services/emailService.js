@@ -57,6 +57,9 @@ function getTransporter() {
     port,
     secure: port === 465, // true for 465 (SSL), false for 587 (STARTTLS)
     auth: { user, pass },
+    connectionTimeout: 5000,
+    greetingTimeout: 5000,
+    socketTimeout: 5000,
   })
 
   return _transporter
