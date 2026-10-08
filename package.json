@@ -22,7 +22,8 @@
     "test": "node tests/test-cors.mjs",
     "test:cors": "node tests/test-cors.mjs",
     "test:live": "node tests/test-live-sessions-inmem.mjs",
-    "test:certificates": "node tests/test-certificate-generation-inmem.mjs"
+    "test:certificates": "node tests/test-certificate-generation-inmem.mjs",
+    "test:email": "node scripts/test-email.mjs"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

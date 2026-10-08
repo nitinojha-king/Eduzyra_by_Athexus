@@ -305,7 +305,8 @@ export const forgotPassword = asyncHandler(async (req, res) => {
 
   // Dev fallback: if SMTP wasn't configured (sendPasswordResetEmail failed
   // silently), log the reset URL so the developer can test.
-  if (process.env.NODE_ENV !== 'production' && !process.env.SMTP_HOST) {
+  const hasSmtpConfig = (process.env.SMTP_USER || process.env.EMAIL_USER) && (process.env.SMTP_PASS || process.env.EMAIL_PASS)
+  if (process.env.NODE_ENV !== 'production' && !hasSmtpConfig) {
     console.warn('[forgotPassword] SMTP not configured — reset link not sent. Token expires in', ttlMinutes, 'min.')
     console.warn('[forgotPassword] DEBUG reset URL:', resetUrl)
   }

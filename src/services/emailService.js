@@ -43,13 +43,13 @@ let _transporter = null
 function getTransporter() {
   if (_transporter) return _transporter
 
-  const host = process.env.SMTP_HOST
+  const host = process.env.SMTP_HOST || 'smtp.gmail.com'
   const port = Number(process.env.SMTP_PORT) || 587
-  const user = process.env.SMTP_USER
-  const pass = process.env.SMTP_PASS
+  const user = process.env.SMTP_USER || process.env.EMAIL_USER
+  const pass = process.env.SMTP_PASS || process.env.EMAIL_PASS
 
-  if (!host || !user || !pass) {
-    throw new Error('SMTP not configured — set SMTP_HOST, SMTP_USER, SMTP_PASS in .env')
+  if (!user || !pass) {
+    throw new Error('SMTP not configured — set SMTP_USER / EMAIL_USER and SMTP_PASS / EMAIL_PASS in .env')
   }
 
   _transporter = nodemailer.createTransport({
@@ -63,6 +63,20 @@ function getTransporter() {
   })
 
   return _transporter
+}
+
+/**
+ * Verifies SMTP connection and authentication credentials.
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+export async function verifySmtpConnection() {
+  try {
+    const transporter = getTransporter()
+    await transporter.verify()
+    return { success: true }
+  } catch (err) {
+    return { success: false, error: err?.message || String(err) }
+  }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -122,7 +136,8 @@ function emailWrapper(title, bodyHtml) {
 /** Get the FROM address from env, with a sensible default. */
 function fromAddress() {
   const name = process.env.EMAIL_FROM_NAME || 'Eduzyra'
-  const addr = process.env.EMAIL_FROM_ADDRESS || 'noreply@eduzyra.dev'
+  const user = process.env.SMTP_USER || process.env.EMAIL_USER
+  const addr = process.env.EMAIL_FROM_ADDRESS || user || 'noreply@eduzyra.dev'
   return `"${escapeHtml(name)}" <${addr}>`
 }
 
@@ -357,6 +372,7 @@ export async function sendContactEmail({ name, email, message }) {
      <p style="margin:0 0 8px;font-size:13px;color:#64748b;">From: <strong style="color:#12213B;">${escapeHtml(email)}</strong></p>
      <p style="margin:16px 0 8px;font-size:14px;color:#1a202c;white-space:pre-wrap;">${escapeHtml(message)}</p>`
   )
-  const adminEmail = process.env.EMAIL_FROM_ADDRESS || 'noreply@eduzyra.dev'
+  const user = process.env.SMTP_USER || process.env.EMAIL_USER
+  const adminEmail = process.env.ADMIN_EMAIL || process.env.EMAIL_FROM_ADDRESS || user || 'noreply@eduzyra.dev'
   return send({ to: adminEmail, subject: `Contact: ${escapeHtml(name)}`, html })
 }
