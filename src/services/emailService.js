@@ -40,27 +40,52 @@ function escapeHtml(str) {
 // The error only surfaces when an email is actually sent.
 let _transporter = null
 
-function getTransporter() {
+export function getTransporter() {
   if (_transporter) return _transporter
 
-  const host = process.env.SMTP_HOST || 'smtp.gmail.com'
-  const port = Number(process.env.SMTP_PORT) || 587
-  const user = process.env.SMTP_USER || process.env.EMAIL_USER
-  const pass = process.env.SMTP_PASS || process.env.EMAIL_PASS
+  const user = (process.env.SMTP_USER || process.env.EMAIL_USER || '').trim()
+  let pass = (process.env.SMTP_PASS || process.env.EMAIL_PASS || '').trim()
+  const host = (process.env.SMTP_HOST || process.env.EMAIL_HOST || '').trim()
+  const port = Number(process.env.SMTP_PORT || process.env.EMAIL_PORT)
+  const service = (process.env.EMAIL_SERVICE || '').trim().toLowerCase()
 
   if (!user || !pass) {
     throw new Error('SMTP not configured — set SMTP_USER / EMAIL_USER and SMTP_PASS / EMAIL_PASS in .env')
   }
 
-  _transporter = nodemailer.createTransport({
-    host,
-    port,
-    secure: port === 465, // true for 465 (SSL), false for 587 (STARTTLS)
+  // Google App Passwords are 16 characters often copied with spaces (e.g. "abcd efgh ijkl mnop").
+  // Automatically strip internal spaces so it authenticates cleanly.
+  if (pass.includes(' ') && pass.replace(/\s+/g, '').length === 16) {
+    pass = pass.replace(/\s+/g, '')
+  }
+
+  const isGmail =
+    service === 'gmail' ||
+    host === 'smtp.gmail.com' ||
+    (!host && (user.toLowerCase().endsWith('@gmail.com') || user.toLowerCase().endsWith('@googlemail.com')))
+
+  const baseConfig = {
     auth: { user, pass },
-    connectionTimeout: 5000,
-    greetingTimeout: 5000,
-    socketTimeout: 5000,
-  })
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 15000,
+  }
+
+  if (isGmail) {
+    _transporter = nodemailer.createTransport({
+      ...baseConfig,
+      service: 'gmail',
+    })
+  } else {
+    const finalHost = host || 'smtp.gmail.com'
+    const finalPort = port || 587
+    _transporter = nodemailer.createTransport({
+      ...baseConfig,
+      host: finalHost,
+      port: finalPort,
+      secure: finalPort === 465,
+    })
+  }
 
   return _transporter
 }
@@ -133,11 +158,11 @@ function emailWrapper(title, bodyHtml) {
 </html>`
 }
 
-/** Get the FROM address from env, with a sensible default. */
+/** Get the FROM address from env, with a sensible default matching the auth user. */
 function fromAddress() {
   const name = process.env.EMAIL_FROM_NAME || 'Eduzyra'
-  const user = process.env.SMTP_USER || process.env.EMAIL_USER
-  const addr = process.env.EMAIL_FROM_ADDRESS || user || 'noreply@eduzyra.dev'
+  const authUser = (process.env.SMTP_USER || process.env.EMAIL_USER || '').trim()
+  const addr = process.env.EMAIL_FROM_ADDRESS || authUser || 'noreply@eduzyra.dev'
   return `"${escapeHtml(name)}" <${addr}>`
 }
 
@@ -156,14 +181,18 @@ async function send({ to, subject, html }) {
     const errorMessage = err?.message || String(err)
     const isMissingSmtp = errorMessage.includes('SMTP not configured')
 
+    if (isMissingSmtp && process.env.NODE_ENV === 'test') {
+      return true
+    }
+
     if (isMissingSmtp && process.env.NODE_ENV !== 'production') {
-      console.warn('[emailService] SMTP not configured. Dev fallback: email content will be logged to the console.')
+      console.warn('[emailService] SMTP not configured. Dev fallback: email content logged to console.')
       console.group('[emailService] DEV EMAIL OUTPUT')
       console.log('to:', to)
       console.log('subject:', subject)
       console.log('html:', html)
       console.groupEnd()
-      return true
+      return false
     }
 
     console.error('[emailService] Failed to send email:', {

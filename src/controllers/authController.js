@@ -52,6 +52,7 @@ async function issueOtp(user) {
   if (!otpSent) {
     console.warn(`[issueOtp] OTP email delivery failed for ${user.email}. Verification OTP code: ${otp}`)
   }
+  return otpSent
 }
 
 // POST /api/auth/signup
@@ -62,6 +63,18 @@ export const signup = asyncHandler(async (req, res) => {
 
   const existing = await User.findOne({ email: email.toLowerCase() })
   if (existing) {
+    if (!existing.isVerified) {
+      existing.name = name
+      existing.password = password
+      await existing.save()
+      const otpSent = await issueOtp(existing)
+      return res.status(200).json({
+        message: 'Account pending verification. Enter the verification code sent to your email.',
+        email: existing.email,
+        requiresOtp: true,
+        emailSent: otpSent,
+      })
+    }
     throw new ApiError(409, 'An account with this email already exists')
   }
 
@@ -78,12 +91,13 @@ export const signup = asyncHandler(async (req, res) => {
     })
   }
 
-  await issueOtp(user)
+  const otpSent = await issueOtp(user)
 
   res.status(201).json({
     message: 'Account created. Enter the verification code sent to your email.',
     email: user.email,
     requiresOtp: true,
+    emailSent: otpSent,
   })
 })
 
@@ -305,7 +319,7 @@ export const forgotPassword = asyncHandler(async (req, res) => {
 
   // Dev fallback: if SMTP wasn't configured (sendPasswordResetEmail failed
   // silently), log the reset URL so the developer can test.
-  const hasSmtpConfig = (process.env.SMTP_USER || process.env.EMAIL_USER) && (process.env.SMTP_PASS || process.env.EMAIL_PASS)
+  const hasSmtpConfig = Boolean((process.env.SMTP_USER || process.env.EMAIL_USER) && (process.env.SMTP_PASS || process.env.EMAIL_PASS))
   if (process.env.NODE_ENV !== 'production' && !hasSmtpConfig) {
     console.warn('[forgotPassword] SMTP not configured — reset link not sent. Token expires in', ttlMinutes, 'min.')
     console.warn('[forgotPassword] DEBUG reset URL:', resetUrl)
