@@ -40,7 +40,34 @@ function escapeHtml(str) {
 // The error only surfaces when an email is actually sent.
 let _transporter = null
 
-export function getTransporter() {
+/**
+ * Resets and closes the active transporter instance.
+ * Useful for testing, configuration reloading, and avoiding stale connections.
+ */
+export function resetTransporter() {
+  if (_transporter && typeof _transporter.close === 'function') {
+    try {
+      _transporter.close()
+    } catch {
+      // Ignore close error on reset
+    }
+  }
+  _transporter = null
+}
+
+/**
+ * Sets a custom or mock transporter (useful for unit/integration tests).
+ * @param {object|null} transporter
+ */
+export function setTransporter(transporter) {
+  resetTransporter()
+  _transporter = transporter
+}
+
+export function getTransporter({ reload = false } = {}) {
+  if (reload) {
+    resetTransporter()
+  }
   if (_transporter) return _transporter
 
   const user = (process.env.SMTP_USER || process.env.EMAIL_USER || '').trim()
@@ -158,11 +185,29 @@ function emailWrapper(title, bodyHtml) {
 </html>`
 }
 
-/** Get the FROM address from env, with a sensible default matching the auth user. */
+/** Get the FROM address from env, ensuring Gmail sender requirements are met. */
 function fromAddress() {
   const name = process.env.EMAIL_FROM_NAME || 'Eduzyra'
   const authUser = (process.env.SMTP_USER || process.env.EMAIL_USER || '').trim()
-  const addr = process.env.EMAIL_FROM_ADDRESS || authUser || 'noreply@eduzyra.dev'
+  const configuredFrom = (process.env.EMAIL_FROM_ADDRESS || '').trim()
+
+  const isGmailAuth =
+    authUser.toLowerCase().endsWith('@gmail.com') ||
+    authUser.toLowerCase().endsWith('@googlemail.com') ||
+    (process.env.EMAIL_SERVICE || '').trim().toLowerCase() === 'gmail' ||
+    (process.env.SMTP_HOST || '').trim().toLowerCase() === 'smtp.gmail.com'
+
+  // If using Gmail SMTP and configuredFrom is empty or a default placeholder (.dev, example.com, etc.),
+  // always use the authenticated Gmail user to adhere to Gmail sender policy and prevent SPF/rejection.
+  let addr = configuredFrom
+  if (isGmailAuth) {
+    if (!addr || addr.includes('eduzyra.dev') || addr.includes('example.com') || !addr.includes('@')) {
+      addr = authUser
+    }
+  } else if (!addr) {
+    addr = authUser || 'noreply@eduzyra.dev'
+  }
+
   return `"${escapeHtml(name)}" <${addr}>`
 }
 

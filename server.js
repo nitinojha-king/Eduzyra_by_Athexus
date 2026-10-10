@@ -12,20 +12,6 @@ async function start() {
   try {
     await connectDB()
 
-    // Grandfather in existing accounts created before OTP verification was enforced.
-    // This completes the migration from scripts/migrate-verify-existing-users.mjs
-    // so existing accounts (and admin/seed accounts) are never locked out with 403 Forbidden.
-    try {
-      const migrated = await User.updateMany(
-        { isVerified: { $ne: true } },
-        { $set: { isVerified: true } },
-      )
-      if (migrated.modifiedCount > 0) {
-        logger.info(`Grandfathered ${migrated.modifiedCount} existing unverified account(s) to verified.`)
-      }
-    } catch (migErr) {
-      logger.warn('Auto-migration of unverified users encountered an error:', { error: migErr.message })
-    }
 
     server = app.listen(PORT, () => {
       logger.info(`Eduzyra API listening on http://localhost:${PORT}`)
