@@ -2,17 +2,21 @@ import 'dotenv/config'
 import mongoose from 'mongoose'
 import app from './src/app.js'
 import { connectDB } from './src/config/db.js'
-import User from './src/models/User.js'
 import logger from './src/utils/logger.js'
 
 const PORT = process.env.PORT || 5000
 let server = null
 
+// One-time migration note: accounts created BEFORE OTP verification was
+// enforced are grandfathered by scripts/migrate-verify-existing-users.mjs
+// (npm run migrate:verify-users). That script must be run manually — it is
+// deliberately NOT run at boot, because a per-restart updateMany({ isVerified:
+// { $ne: true } }) silently marks brand-new unconfirmed signups as verified
+// and bypasses the OTP check entirely.
+
 async function start() {
   try {
     await connectDB()
-
-
     server = app.listen(PORT, () => {
       logger.info(`Eduzyra API listening on http://localhost:${PORT}`)
     })

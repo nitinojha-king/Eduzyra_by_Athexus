@@ -1,8 +1,10 @@
 import crypto from 'crypto'
+import bcrypt from 'bcryptjs'
 import User from '../models/User.js'
 import Enrollment from '../models/Enrollment.js'
 import Order from '../models/Order.js'
 import Course from '../models/Course.js'
+import PendingSignup from '../models/PendingSignup.js'
 import { generateToken } from '../utils/generateToken.js'
 import { ApiError } from '../utils/ApiError.js'
 import { asyncHandler } from '../utils/asyncHandler.js'
@@ -31,71 +33,114 @@ function clearDevOtp(email) {
   devOtpCache.delete(normalizedEmail)
 }
 
-// Generates a fresh OTP, stamps it (hashed) on the user document, and emails
-// the raw code. Caller is responsible for `await user.save()` beforehand if
-// other fields changed, and for saving again after this returns (this only
-// mutates the in-memory document — it does not persist on its own, so it can
-// be composed with a single save() call by the caller).
-async function issueOtp(user) {
+/** How long an unconfirmed signup is retained before it is dropped entirely. */
+function pendingSignupExpiry() {
+  const hours = Number(process.env.PENDING_SIGNUP_TTL_HOURS || 24)
+  return new Date(Date.now() + hours * 60 * 60 * 1000)
+}
+
+/** Minimum seconds between two OTP mails for the same address. */
+function isWithinResendCooldown(lastSentAt) {
+  if (!lastSentAt) return false
+  const secondsSinceLast = (Date.now() - new Date(lastSentAt).getTime()) / 1000
+  return secondsSinceLast < OTP_RESEND_COOLDOWN_SECONDS
+}
+
+function resendCooldownError(lastSentAt) {
+  const secondsSinceLast = (Date.now() - new Date(lastSentAt).getTime()) / 1000
+  const waitSeconds = Math.ceil(OTP_RESEND_COOLDOWN_SECONDS - secondsSinceLast)
+  return new ApiError(429, `Please wait ${waitSeconds}s before requesting another code.`, 'OTP_COOLDOWN')
+}
+
+// Issues a fresh OTP onto an existing PendingSignup document. This is the
+// single point where an OTP is minted and emailed, for both signup and
+// resend. The signup stays pending — no User row exists yet, so nothing is
+// activated until the code is confirmed.
+//
+// Returns the raw code only for dev-only callers; production ignores it.
+async function issueOtpForPending(pending) {
   const otp = generateOtp()
-  user.otpCode = hashOtp(otp)
-  user.otpExpires = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000)
-  user.otpAttempts = 0
-  user.otpLastSentAt = new Date()
-  await user.save()
+  pending.otpCode = hashOtp(otp)
+  pending.otpExpires = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000)
+  pending.otpAttempts = 0
+  pending.otpLastSentAt = new Date()
+  pending.expiresAt = pendingSignupExpiry()
+  await pending.save()
 
   if (process.env.NODE_ENV !== 'production') {
-    storeDevOtp(user.email, otp, user.otpExpires)
+    storeDevOtp(pending.email, otp, pending.otpExpires)
   }
 
-  const otpSent = await sendOtpEmail({ name: user.name, email: user.email, otp, ttlMinutes: OTP_TTL_MINUTES })
-  if (!otpSent) {
-    console.warn(`[issueOtp] OTP email delivery failed for ${user.email}. Verification OTP code: ${otp}`)
+  const sent = await sendOtpEmail({
+    name: pending.name,
+    email: pending.email,
+    otp,
+    ttlMinutes: OTP_TTL_MINUTES,
+  })
+
+  if (!sent) {
+    // The pending record survives, so the account can still be completed once
+    // the mail problem is fixed. Never log the code itself.
+    console.error(`[issueOtp] OTP email delivery failed for ${pending.email}. Signup remains pending.`)
   }
-  return otpSent
+  return sent
 }
 
 // POST /api/auth/signup
 //
-// Signup creates account and issues OTP unless AUTO_VERIFY_USERS is enabled.
+// Creates NO User row. The account is staged in PendingSignup (with the
+// password already bcrypt-hashed) and is only written to `users` once the
+// emailed OTP is confirmed via POST /api/auth/verify-otp.
+//
+// Retrying signup with the same address is safe: the existing pending signup
+// gets a fresh OTP instead of a 409 clash.
 export const signup = asyncHandler(async (req, res) => {
   const { name, email, password } = req.validatedBody || req.body
+  const normalizedEmail = email.toLowerCase()
 
-  const existing = await User.findOne({ email: email.toLowerCase() })
-  if (existing) {
-    if (!existing.isVerified) {
-      existing.name = name
-      existing.password = password
-      await existing.save()
-      const otpSent = await issueOtp(existing)
-      return res.status(200).json({
-        message: 'Account pending verification. Enter the verification code sent to your email.',
-        email: existing.email,
-        requiresOtp: true,
-        emailSent: otpSent,
-      })
-    }
+  if (await User.exists({ email: normalizedEmail })) {
     throw new ApiError(409, 'An account with this email already exists')
   }
 
-  const shouldAutoVerify = process.env.AUTO_VERIFY_USERS === 'true'
-  const user = await User.create({ name, email, password, role: 'student', isVerified: shouldAutoVerify })
+  const passwordHash = await bcrypt.hash(password, 10)
 
-  if (shouldAutoVerify) {
-    const token = generateToken(user)
+  // Escape hatch: when AUTO_VERIFY_USERS=true the account is written
+  // immediately and no OTP is sent at all. Admin/instructor provisioning and
+  // the seed script rely on this — it must keep bypassing the OTP stage.
+  if (process.env.AUTO_VERIFY_USERS === 'true') {
+    const user = new User({ name, email: normalizedEmail, role: 'student', isVerified: true })
+    user.password = passwordHash
+    user.$locals.bypassPasswordHash = true
+    user.passwordChangedAt = new Date()
+    await user.save()
+    await PendingSignup.deleteOne({ email: normalizedEmail })
+
     return res.status(201).json({
       message: 'Account created successfully.',
       user: user.toSafeObject(),
-      token,
+      token: generateToken(user),
       requiresOtp: false,
     })
   }
 
-  const otpSent = await issueOtp(user)
+  // Retrying signup re-issues the code on the existing staged record instead
+  // of failing with a 409 — the address is not yet a real account.
+  let staged = await PendingSignup.findOne({ email: normalizedEmail })
+  if (!staged) {
+    staged = await PendingSignup.create({
+      name,
+      email: normalizedEmail,
+      passwordHash,
+      role: 'student',
+      expiresAt: pendingSignupExpiry(),
+    })
+  }
+
+  const otpSent = await issueOtpForPending(staged)
 
   res.status(201).json({
     message: 'Account created. Enter the verification code sent to your email.',
-    email: user.email,
+    email: normalizedEmail,
     requiresOtp: true,
     emailSent: otpSent,
   })
@@ -103,27 +148,98 @@ export const signup = asyncHandler(async (req, res) => {
 
 // POST /api/auth/verify-otp
 //
-// Confirms the code emailed at signup (or resend-otp) and, on success,
-// activates the account and returns a login token — mirroring what signup
-// used to return directly.
+// Confirms the code emailed at signup (or resend-otp), THEN writes the account
+// to the `users` collection and returns a login token. Before this call the
+// user's only trace is their PendingSignup document.
 export const verifyOtp = asyncHandler(async (req, res) => {
   const { email, otp } = req.validatedBody || req.body
+  const normalizedEmail = email.toLowerCase()
 
-  const user = await User.findOne({ email: email.toLowerCase() }).select(
-    '+otpCode +otpExpires +otpAttempts',
+  const pending = await PendingSignup.findOne({ email: normalizedEmail }).select(
+    '+otpCode +otpExpires +otpAttempts +passwordHash'
   )
-  if (!user) {
+
+  if (!pending) {
+    // No staged signup. An unverified User is a pre-pending-flow account —
+    // verify that in place so those users are never stranded.
+    const legacy = await User.findOne({ email: normalizedEmail, isVerified: false }).select(
+      '+otpCode +otpExpires +otpAttempts'
+    )
+    if (legacy) return verifyLegacyUser(legacy, otp, res)
     throw new ApiError(400, 'Invalid or expired code')
   }
 
-  // Already-verified accounts must log in with their password — never mint
-  // a session from an OTP guess. (Previously this branch returned a token
-  // without checking the code, so anyone knowing a verified email could get
-  // access with any 6-digit code.)
-  if (user.isVerified) {
-    throw new ApiError(400, 'This account is already verified. Please log in instead.')
+  if (!pending.otpCode || !pending.otpExpires || pending.otpExpires < new Date()) {
+    throw new ApiError(400, 'This code has expired. Request a new one.', 'OTP_EXPIRED')
   }
 
+  if (pending.otpAttempts >= OTP_MAX_ATTEMPTS) {
+    throw new ApiError(429, 'Too many incorrect attempts. Request a new code.', 'OTP_LOCKED')
+  }
+
+  if (hashOtp(otp) !== pending.otpCode) {
+    pending.otpAttempts += 1
+    await pending.save()
+    throw new ApiError(400, 'Incorrect code. Please try again.', 'OTP_INVALID')
+  }
+
+  // ── Code confirmed: this is where the account is written to the database ──
+  const user = await activatePendingSignup(pending)
+
+  res.json({ user: user.toSafeObject(), token: generateToken(user) })
+})
+
+// Creates the real User account from a confirmed pending signup and removes
+// the staging document. The bcrypt hash is copied across verbatim, so
+// `$locals.bypassPasswordHash` stops the User pre-save hook from hashing a
+// hash (which would make the account impossible to log into).
+async function activatePendingSignup(pending) {
+  // A User row can still exist for this address if it was created by an older
+  // flow while the signup was staged — adopt and verify it rather than crash
+  // on the unique email index.
+  const existing = await User.findOne({ email: pending.email })
+  if (existing) {
+    existing.isVerified = true
+    existing.otpCode = undefined
+    existing.otpExpires = undefined
+    existing.otpAttempts = 0
+    await existing.save()
+    await PendingSignup.deleteOne({ _id: pending._id })
+    return existing
+  }
+
+  const user = new User({
+    name: pending.name,
+    email: pending.email,
+    role: pending.role,
+    isVerified: true,
+  })
+  user.password = pending.passwordHash
+  user.$locals.bypassPasswordHash = true
+  // The hash was produced at signup, so the credential is as old as the
+  // signup — stamp it so pre-existing JWTs (there can be none) stay rejected.
+  user.passwordChangedAt = pending.createdAt
+  await user.save()
+
+  // The account now lives in `users`; the staging doc must go.
+  await PendingSignup.deleteOne({ _id: pending._id })
+
+  if (process.env.NODE_ENV !== 'production') {
+    clearDevOtp(pending.email)
+  }
+
+  try {
+    await sendWelcomeEmail({ name: user.name, email: user.email })
+  } catch (err) {
+    console.error('[verifyOtp] Welcome email failed:', err?.message || err)
+  }
+
+  return user
+}
+
+// Legacy path for accounts that predate the pending-signup flow: verify the
+// existing User document in place instead of creating a new one.
+async function verifyLegacyUser(user, otp, res) {
   if (!user.otpCode || !user.otpExpires || user.otpExpires < new Date()) {
     throw new ApiError(400, 'This code has expired. Request a new one.', 'OTP_EXPIRED')
   }
@@ -145,15 +261,8 @@ export const verifyOtp = asyncHandler(async (req, res) => {
   await user.save()
   clearDevOtp(user.email)
 
-  try {
-    await sendWelcomeEmail({ name: user.name, email: user.email })
-  } catch (err) {
-    console.error('[verifyOtp] Welcome email failed:', err?.message || err)
-  }
-
-  const token = generateToken(user)
-  res.json({ user: user.toSafeObject(), token })
-})
+  res.json({ user: user.toSafeObject(), token: generateToken(user) })
+}
 
 // POST /api/auth/resend-otp
 //
@@ -162,23 +271,39 @@ export const verifyOtp = asyncHandler(async (req, res) => {
 // (OTP_RESEND_COOLDOWN_SECONDS) prevents spamming the mailbox.
 export const resendOtp = asyncHandler(async (req, res) => {
   const { email } = req.validatedBody || req.body
+  const normalizedEmail = email.toLowerCase()
 
-  const user = await User.findOne({ email: email.toLowerCase() }).select('+otpLastSentAt')
   const genericMessage = { message: 'If that account needs verification, a new code has been sent.' }
 
-  if (!user || user.isVerified) {
-    return res.json(genericMessage)
-  }
+  let pending = await PendingSignup.findOne({ email: normalizedEmail }).select('+otpLastSentAt')
 
-  if (user.otpLastSentAt) {
-    const secondsSinceLast = (Date.now() - user.otpLastSentAt.getTime()) / 1000
-    if (secondsSinceLast < OTP_RESEND_COOLDOWN_SECONDS) {
-      const waitSeconds = Math.ceil(OTP_RESEND_COOLDOWN_SECONDS - secondsSinceLast)
-      throw new ApiError(429, `Please wait ${waitSeconds}s before requesting another code.`, 'OTP_COOLDOWN')
+  // No staged signup. Bridge any pre-pending-flow unverified User by staging
+  // them now (their password hash is already stored, so it just moves over)
+  // and then issuing a code — otherwise they could never verify.
+  if (!pending) {
+    const legacy = await User.findOne({ email: normalizedEmail, isVerified: false }).select('+password +otpLastSentAt')
+
+    // Verified account, or nothing at all: nothing to send. Say the generic
+    // thing either way so account state is never leaked.
+    if (!legacy) {
+      return res.json(genericMessage)
     }
+
+    pending = await PendingSignup.create({
+      name: legacy.name,
+      email: legacy.email,
+      passwordHash: legacy.password,
+      role: legacy.role,
+      otpLastSentAt: legacy.otpLastSentAt,
+      expiresAt: pendingSignupExpiry(),
+    })
   }
 
-  await issueOtp(user)
+  if (isWithinResendCooldown(pending.otpLastSentAt)) {
+    throw resendCooldownError(pending.otpLastSentAt)
+  }
+
+  await issueOtpForPending(pending)
   res.json(genericMessage)
 })
 

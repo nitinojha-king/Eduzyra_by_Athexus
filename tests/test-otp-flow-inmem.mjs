@@ -4,12 +4,14 @@ import mongoose from 'mongoose'
 import nodemailer from 'nodemailer'
 import app from '../src/app.js'
 import User from '../src/models/User.js'
+import PendingSignup from '../src/models/PendingSignup.js'
 import { getTransporter, resetTransporter, setTransporter } from '../src/services/emailService.js'
 import { hashOtp } from '../src/utils/otp.js'
 
 /**
  * End-to-End In-Memory Test Suite:
- * Complete Signup, OTP Generation, Verification, Resend, and Configuration Flow
+ * Signup staged in PendingSignup, OTP generation, verification, resend, and
+ * SMTP configuration flow.
  */
 async function runTests() {
   console.log('\n======================================================')
@@ -18,7 +20,7 @@ async function runTests() {
 
   // Set test environment
   process.env.NODE_ENV = 'test'
-  process.env.JWT_SECRET = 'test_jwt_secret_for_unit_tests_12345678'
+  process.env.JWT_SECRET = process.env.JWT_SECRET || 'test_jwt_secret_for_unit_tests_12345678'
 
   // 1. Start in-memory MongoDB
   const mongoServer = await MongoMemoryServer.create()
@@ -31,6 +33,7 @@ async function runTests() {
   const port = server.address().port
   const baseUrl = `http://127.0.0.1:${port}`
 
+  let failed = false
   try {
     // -------------------------------------------------------------
     // Test 1: Configuration & Aliases (EMAIL_USER / EMAIL_PASS)
@@ -46,7 +49,7 @@ async function runTests() {
     assert.equal(transporter.options.auth.user, 'testteacher@gmail.com', 'EMAIL_USER must be resolved')
     assert.equal(transporter.options.auth.pass, 'abcdefghijklmnop', '16-char Google App Password spaces must be stripped')
     assert.equal(transporter.options.service, 'gmail', 'Gmail service must be auto-detected for @gmail.com')
-    assert.equal(transporter.options.connectionTimeout, 15000, 'Connection timeout must be 15000ms')
+    assert.equal(transporter.options.connectionTimeout, 30000, 'Connection timeout must be 30000ms')
     console.log('✅ Test 1 Passed: EMAIL_USER/EMAIL_PASS and Gmail sanitization verified.')
 
     // -------------------------------------------------------------
@@ -83,7 +86,7 @@ async function runTests() {
     process.env.EMAIL_PASS = 'mockpassword1234'
 
     // -------------------------------------------------------------
-    // Test 3: Signup creates unverified account, stores hashed OTP & sends email
+    // Test 3: Signup stages PendingSignup, stores hashed OTP & sends email
     // -------------------------------------------------------------
     console.log('\n[Test 3] Testing Signup API & OTP creation...')
     const testUser = {
@@ -104,25 +107,25 @@ async function runTests() {
     assert.equal(signupData.email, testUser.email, 'Returned email must match')
     assert.equal(signupData.emailSent, true, 'Email dispatch must succeed')
 
-    // Inspect user in DB
-    const dbUser = await User.findOne({ email: testUser.email }).select('+otpCode +otpExpires +otpAttempts')
-    assert.ok(dbUser, 'User must exist in database')
-    assert.equal(dbUser.isVerified, false, 'User must initially be unverified')
-    assert.ok(dbUser.otpCode, 'Hashed OTP code must exist in DB')
-    assert.equal(dbUser.otpCode.length, 64, 'otpCode must be a 64-char SHA-256 hash')
-    assert.ok(dbUser.otpExpires > new Date(), 'OTP expiration must be in the future')
+    // The account is only staged — NO User row exists until the OTP is confirmed
+    assert.equal(await User.countDocuments({ email: testUser.email }), 0, 'User row must NOT exist before OTP confirmation')
+    const dbPending = await PendingSignup.findOne({ email: testUser.email }).select('+otpCode +otpExpires +otpAttempts')
+    assert.ok(dbPending, 'PendingSignup staging record must exist')
+    assert.ok(dbPending.otpCode, 'Hashed OTP code must exist in DB')
+    assert.equal(dbPending.otpCode.length, 64, 'otpCode must be a 64-char SHA-256 hash')
+    assert.ok(dbPending.otpExpires > new Date(), 'OTP expiration must be in the future')
 
     // Verify email was actually dispatched to user's registered email
     assert.equal(sentEmails.length, 1, 'Exactly one OTP email must be dispatched')
     assert.equal(sentEmails[0].to, testUser.email, 'Email must be sent to registered user')
     assert.match(sentEmails[0].subject, /verification code/i, 'Subject must mention verification code')
     assert.match(sentEmails[0].from, /eduzyra\.official@gmail\.com/, 'From header must match authenticated Gmail account')
-    console.log('✅ Test 3 Passed: User created unverified, hashed in DB, and OTP email delivered to recipient.')
+    console.log('✅ Test 3 Passed: Signup staged in PendingSignup, OTP hashed in DB, and OTP email delivered.')
 
     // -------------------------------------------------------------
-    // Test 4: Unverified user cannot log in
+    // Test 4: Staged account cannot log in (no User row exists yet)
     // -------------------------------------------------------------
-    console.log('\n[Test 4] Verifying unverified account login block...')
+    console.log('\n[Test 4] Verifying unconfirmed account login block...')
     const loginRes = await fetch(`${baseUrl}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -131,10 +134,8 @@ async function runTests() {
         password: testUser.password,
       }),
     })
-    const loginData = await loginRes.json()
-    assert.equal(loginRes.status, 403, 'Login must be blocked with 403 Forbidden')
-    assert.equal(loginData.errorCode, 'EMAIL_NOT_VERIFIED', 'Error code must be EMAIL_NOT_VERIFIED')
-    console.log('✅ Test 4 Passed: Login prevented with EMAIL_NOT_VERIFIED.')
+    assert.equal(loginRes.status, 401, 'Login must be blocked with 401 before OTP confirmation')
+    console.log('✅ Test 4 Passed: Login prevented until the OTP is confirmed.')
 
     // -------------------------------------------------------------
     // Test 5: OTP validation schema checks (string & number, rejects invalid formats)
@@ -181,8 +182,8 @@ async function runTests() {
     assert.equal(wrongOtpRes.status, 400, 'Wrong OTP must return 400')
     assert.equal(wrongOtpData.errorCode, 'OTP_INVALID', 'Error code must be OTP_INVALID')
 
-    const dbUserAfterWrong = await User.findOne({ email: testUser.email }).select('+otpAttempts')
-    assert.equal(dbUserAfterWrong.otpAttempts, 1, 'otpAttempts must increment to 1')
+    const pendingAfterWrong = await PendingSignup.findOne({ email: testUser.email }).select('+otpAttempts')
+    assert.equal(pendingAfterWrong.otpAttempts, 1, 'otpAttempts must increment to 1')
     console.log('✅ Test 6 Passed: Incorrect OTP rejected and attempts tracked.')
 
     // -------------------------------------------------------------
@@ -190,9 +191,10 @@ async function runTests() {
     // -------------------------------------------------------------
     console.log('\n[Test 7] Testing valid NUMERIC OTP confirmation (frontend sending number)...')
     const knownOtp = '123456'
-    dbUser.otpCode = hashOtp(knownOtp)
-    dbUser.otpExpires = new Date(Date.now() + 10 * 60 * 1000)
-    await dbUser.save()
+    const pendingForOtp = await PendingSignup.findOne({ email: testUser.email }).select('+otpCode +otpExpires')
+    pendingForOtp.otpCode = hashOtp(knownOtp)
+    pendingForOtp.otpExpires = new Date(Date.now() + 10 * 60 * 1000)
+    await pendingForOtp.save()
 
     sentEmails.length = 0
     const verifyRes = await fetch(`${baseUrl}/api/auth/verify-otp`, {
@@ -212,6 +214,11 @@ async function runTests() {
     assert.equal(dbUserVerified.isVerified, true, 'Database isVerified must be true')
     assert.equal(dbUserVerified.otpCode, undefined, 'otpCode must be cleared')
     assert.equal(dbUserVerified.otpExpires, undefined, 'otpExpires must be cleared')
+    assert.equal(await PendingSignup.countDocuments({ email: testUser.email }), 0, 'staging record must be cleared')
+
+    // The stored credential must be the ORIGINAL password, not a double-hashed one
+    const withPass = await User.findOne({ email: testUser.email }).select('+password')
+    assert.ok(await withPass.comparePassword(testUser.password), 'original password must work after activation')
 
     // Verify welcome email was dispatched upon verification
     assert.equal(sentEmails.length, 1, 'Welcome email must be sent upon verification')
@@ -277,9 +284,9 @@ async function runTests() {
     console.log('✅ Test 10 Passed: Resend cooldown correctly enforced.')
 
     // -------------------------------------------------------------
-    // Test 11: Unverified user re-signing up recovers gracefully
+    // Test 11: Unconfirmed user re-signing up recovers gracefully
     // -------------------------------------------------------------
-    console.log('\n[Test 11] Testing unverified user re-signup recovery...')
+    console.log('\n[Test 11] Testing unconfirmed user re-signup recovery...')
     const reSignupRes = await fetch(`${baseUrl}/api/auth/signup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -290,18 +297,21 @@ async function runTests() {
       }),
     })
     const reSignupData = await reSignupRes.json()
-    assert.equal(reSignupRes.status, 200, 'Re-signup for unverified user must return 200 OK')
+    assert.equal(reSignupRes.status, 201, 'Re-signup for unconfirmed user must return 201 OK')
     assert.equal(reSignupData.requiresOtp, true, 'Must still require OTP')
-    console.log('✅ Test 11 Passed: Unverified user re-signing up recovers cleanly without 409 conflict.')
+    console.log('✅ Test 11 Passed: Unconfirmed user re-signing up recovers cleanly without 409 conflict.')
 
     console.log('\n======================================================')
     console.log('   🎉 All 11 OTP & Auth Flow Tests Passed Successfully!')
     console.log('======================================================\n')
+  } catch (err) {
+    failed = true
+    console.error('\n❌ Test Suite Failed:', err)
   } finally {
     server.close()
     await mongoose.connection.close()
     await mongoServer.stop()
-    process.exit(0)
+    process.exit(failed ? 1 : 0)
   }
 }
 

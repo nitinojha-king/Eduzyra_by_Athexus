@@ -34,6 +34,10 @@ const userSchema = new mongoose.Schema(
 )
 
 userSchema.pre('save', async function hashPassword(next) {
+  // Set `$locals.bypassPasswordHash` when the password field already holds a
+  // bcrypt hash (the pending-signup flow imports it verbatim) — re-hashing it
+  // would make the account impossible to log into.
+  if (this.$locals?.bypassPasswordHash) return next()
   if (!this.isModified('password')) return next()
   const salt = await bcrypt.genSalt(10)
   this.password = await bcrypt.hash(this.password, salt)

@@ -93,9 +93,16 @@ export function getTransporter({ reload = false } = {}) {
 
   const baseConfig = {
     auth: { user, pass },
-    connectionTimeout: 15000,
-    greetingTimeout: 15000,
-    socketTimeout: 15000,
+    // Reuse the connection instead of reconnecting per send.
+    pool: true,
+    maxConnections: 2,
+    maxMessages: 100,
+    // The previous 5000ms values are far too tight for SMTP from a PaaS: the
+    // TCP handshake to Gmail alone routinely exceeds 5s, and socketTimeout
+    // killed the connection mid-send while Gmail was accepting the message.
+    connectionTimeout: 30_000,
+    greetingTimeout: 30_000,
+    socketTimeout: 60_000,
   }
 
   if (isGmail) {
@@ -111,6 +118,8 @@ export function getTransporter({ reload = false } = {}) {
       host: finalHost,
       port: finalPort,
       secure: finalPort === 465,
+      // Upgrade to TLS on plaintext ports instead of sending credentials in the clear.
+      requireTLS: finalPort !== 465,
     })
   }
 
@@ -211,8 +220,35 @@ function fromAddress() {
   return `"${escapeHtml(name)}" <${addr}>`
 }
 
+// ── Error classification ──────────────────────────────────────────────────
+// SMTP failures that are worth one automatic retry: timeouts and dropped
+// connections on a hosted network. Auth/permission errors are NOT retried —
+// a 535 from Gmail will fail again immediately.
+const RETRYABLE_SMTP_CODES = new Set([
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'EAI_AGAIN',
+  'ENOTFOUND',
+  'ESOCKET',
+  'EPIPE',
+])
+
+function isRetryableSmtpError(err) {
+  return RETRYABLE_SMTP_CODES.has(err?.code)
+}
+
 /** Centralised send — wraps transporter.sendMail in try/catch, logs failures. */
 async function send({ to, subject, html }) {
+  const isMissingSmtp = () => {
+    try {
+      getTransporter()
+      return false
+    } catch {
+      return true
+    }
+  }
+
   try {
     const transporter = getTransporter()
     await transporter.sendMail({
@@ -224,26 +260,63 @@ async function send({ to, subject, html }) {
     return true
   } catch (err) {
     const errorMessage = err?.message || String(err)
-    const isMissingSmtp = errorMessage.includes('SMTP not configured')
 
-    if (isMissingSmtp && process.env.NODE_ENV === 'test') {
-      return true
-    }
+    if (isMissingSmtp()) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn('[emailService] SMTP not configured. Dev fallback: email content logged to console.')
+        console.group('[emailService] DEV EMAIL OUTPUT')
+        console.log('to:', to)
+        console.log('subject:', subject)
+        console.log('html:', html)
+        console.groupEnd()
+        return true
+      }
 
-    if (isMissingSmtp && process.env.NODE_ENV !== 'production') {
-      console.warn('[emailService] SMTP not configured. Dev fallback: email content logged to console.')
-      console.group('[emailService] DEV EMAIL OUTPUT')
-      console.log('to:', to)
-      console.log('subject:', subject)
-      console.log('html:', html)
-      console.groupEnd()
+      console.error('[emailService] SMTP not configured — email NOT sent. Set SMTP_USER / EMAIL_USER and SMTP_PASS / EMAIL_PASS.', {
+        to,
+        subject,
+      })
       return false
     }
 
+    if (isRetryableSmtpError(err)) {
+      console.warn('[emailService] Transient SMTP failure — retrying once:', {
+        to,
+        subject,
+        code: err?.code,
+        error: errorMessage,
+      })
+      try {
+        // A pooled connection can go stale after the failure — drop it so the
+        // retry dials a fresh one.
+        _transporter?.close?.()
+        _transporter = null
+        const transporter = getTransporter()
+        await transporter.sendMail({ from: fromAddress(), to, subject, html })
+        return true
+      } catch (retryErr) {
+        console.error('[emailService] Failed to send email (retry gave up):', {
+          to,
+          subject,
+          code: retryErr?.code,
+          responseCode: retryErr?.responseCode,
+          response: retryErr?.response,
+          error: retryErr?.message || String(retryErr),
+        })
+        return false
+      }
+    }
+
+    // Non-retryable: bad credentials, rejected sender, blocked recipient.
+    // The responseCode/response pair is where Gmail states the real reason.
     console.error('[emailService] Failed to send email:', {
       to,
       subject,
+      code: err?.code,
+      responseCode: err?.responseCode,
+      response: err?.response,
       error: errorMessage,
+      ...(isMissingSmtp() ? { hint: 'SMTP credentials are missing or incomplete.' } : {}),
     })
     return false
   }
