@@ -6,6 +6,10 @@ import nodemailer from 'nodemailer'
  * Transport: SMTP (Gmail App Password OR Brevo SMTP — both work via the same
  * env vars: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS).
  *
+ * On hosts where outbound SMTP is blocked (e.g. Render free tier blocks ports
+ * 25/465/587), set RESEND_API_KEY instead: mail is then sent through the
+ * Resend HTTPS API, which takes precedence over SMTP when configured.
+ *
  * Templates: all emails use inline-styled responsive HTML (email clients strip
  * <style> tags, so styles must be inline). Each function builds its own HTML
  * string with the Eduzyra header + body + footer.
@@ -238,8 +242,91 @@ function isRetryableSmtpError(err) {
   return RETRYABLE_SMTP_CODES.has(err?.code)
 }
 
+// ── Resend HTTP API provider ────────────────────────────────────────────────
+// Render's free tier blocks outbound SMTP (ports 25/465/587) at the network
+// level, so nodemailer can never connect from there (ETIMEDOUT). The Resend
+// HTTPS API (port 443) is NOT blocked and works on free Render instances.
+//
+// Precedence: when RESEND_API_KEY is set, ALL mail goes through Resend and
+// SMTP is never touched. Otherwise the SMTP transporter path below is used.
+//
+// Setup: create a free key at https://resend.com/api-keys, verify a sending
+// domain in the Resend dashboard, and set EMAIL_FROM_ADDRESS to an address on
+// that domain. NOTE: without a verified domain Resend only delivers to the
+// account owner's own address (testing mode) — OTP mail to real users will
+// be rejected with a 403 until the domain is verified.
+function usingResend() {
+  return Boolean((process.env.RESEND_API_KEY || '').trim())
+}
+
+let _warnedResendFrom = false
+
+function resendFromAddress() {
+  const name = process.env.EMAIL_FROM_NAME || 'Eduzyra'
+  const configured = (process.env.EMAIL_FROM_ADDRESS || '').trim()
+  const smtpUser = (process.env.SMTP_USER || process.env.EMAIL_USER || '').trim()
+
+  const addr = configured || smtpUser || 'noreply@eduzyra.dev'
+  // Only warn when falling back: an explicitly configured EMAIL_FROM_ADDRESS
+  // is trusted (the owner pointed it at their verified Resend domain).
+  if (!configured && !_warnedResendFrom) {
+    _warnedResendFrom = true
+    console.warn(
+      '[emailService] Sending via Resend but EMAIL_FROM_ADDRESS is not set ' +
+        `(${addr}). Verify a domain at https://resend.com/domains and set EMAIL_FROM_ADDRESS to it, ` +
+        'or delivery to other recipients will fail.'
+    )
+  }
+  return `"${escapeHtml(name)}" <${addr}>`
+}
+
+/** Send one email through the Resend HTTPS API. Returns true on acceptance. */
+export async function sendViaResend({ to, subject, html }) {
+  const apiKey = (process.env.RESEND_API_KEY || '').trim()
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: resendFromAddress(),
+        to: [to],
+        subject,
+        html,
+      }),
+    })
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      console.error('[emailService] Resend API rejected the email:', {
+        to,
+        subject,
+        status: res.status,
+        error: body.slice(0, 500),
+      })
+      return false
+    }
+    return true
+  } catch (err) {
+    console.error('[emailService] Resend API request failed:', {
+      to,
+      subject,
+      code: err?.code,
+      error: err?.message || String(err),
+    })
+    return false
+  }
+}
+
 /** Centralised send — wraps transporter.sendMail in try/catch, logs failures. */
 async function send({ to, subject, html }) {
+  // Resend (HTTPS) takes precedence — it works where SMTP ports are blocked
+  // (e.g. Render free tier). SMTP is only used when no Resend key is set.
+  if (usingResend()) {
+    return sendViaResend({ to, subject, html })
+  }
+
   const isMissingSmtp = () => {
     try {
       getTransporter()

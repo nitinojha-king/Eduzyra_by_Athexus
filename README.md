@@ -44,6 +44,7 @@ All vars are documented in [`.env.example`](.env.example). Never commit `.env` �
 | OTP | `OTP_TTL_MINUTES`, `OTP_RESEND_COOLDOWN_SECONDS`, `OTP_MAX_ATTEMPTS` |
 | Razorpay | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `CURRENCY` |
 | Email (SMTP) | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM_NAME`, `EMAIL_FROM_ADDRESS`, `ADMIN_EMAIL` |
+| Email (Resend HTTP) | `RESEND_API_KEY` — takes precedence over SMTP. **Required on Render free tier**, which blocks outbound SMTP ports 25/465/587. Verify a sending domain at resend.com/domains and point `EMAIL_FROM_ADDRESS` at it. |
 | Cloudinary | `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`, `CLOUDINARY_FOLDER` |
 
 Generate secrets with `node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"`.
@@ -198,7 +199,7 @@ docs/                     # feature notes (e.g. CERTIFICATE_TESTING.md)
 
 ## Deployment
 
-- **Render / single container:** `npm ci --omit=dev && node server.js`. Set `NODE_ENV=production`, `CLIENT_ORIGIN=https://<frontend>`, `MONGO_URI`, `JWT_SECRET`, Razorpay/SMTP/Cloudinary vars. Health check path: `/api/health`.
+- **Render / single container:** `npm ci --omit=dev && node server.js`. Set `NODE_ENV=production`, `CLIENT_ORIGIN=https://<frontend>`, `MONGO_URI`, `JWT_SECRET`, Razorpay/SMTP/Cloudinary vars. Health check path: `/api/health`. **On the free tier, SMTP (nodemailer) cannot work** — Render blocks ports 25/465/587, so set `RESEND_API_KEY` instead (HTTPS email API).
 - **Docker:** `docker build -t eduzyra-backend . && docker run -p 5000:5000 --env-file .env eduzyra-backend`. Multi-stage build installs Sharp's `vips` deps; runs as non-root with a `HEALTHCHECK` on `/api/health`.
 - **PM2 (VPS):** `npm run start:prod` (cluster, `ecosystem.config.cjs`). With `instances: max`, front with Redis if you raise rate limits — `express-rate-limit` MemoryStore is per-process.
 - **Razorpay webhook:** expose `POST /api/payments/webhook`, paste the URL + secret into Dashboard → Settings → Webhooks, subscribe to `payment.captured`, `payment.failed`, `refund.processed`.

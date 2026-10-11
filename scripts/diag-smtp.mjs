@@ -1,5 +1,5 @@
 import 'dotenv/config'
-import { getTransporter } from '../src/services/emailService.js'
+import { getTransporter, sendViaResend } from '../src/services/emailService.js'
 
 function maskString(str) {
   if (!str) return '(not set)'
@@ -46,6 +46,40 @@ async function run() {
   console.log(`  Sender From:        "${fromName}" <${maskEmail(fromAddress)}>`)
   console.log('----------------------------------------')
 
+  const resendKey = (process.env.RESEND_API_KEY || '').trim()
+  const testRecipient = process.argv[2]
+
+  // ── Resend HTTP API mode (works on Render free tier; SMTP ports blocked) ──
+  if (resendKey) {
+    console.log('\nEmail provider:       Resend (HTTPS API — takes precedence over SMTP)')
+    console.log(`  RESEND_API_KEY:     [SET, length ${resendKey.length}]`)
+    if (!resendKey.startsWith('re_')) {
+      console.error('\n❌ ERROR: RESEND_API_KEY does not look like a Resend key (expected to start with "re_").')
+      process.exit(1)
+    }
+    if (!fromAddress || fromAddress.includes('eduzyra.dev') || fromAddress.includes('example.com')) {
+      console.warn('\n⚠️  WARNING: EMAIL_FROM_ADDRESS is not set to a verified-domain address.')
+      console.warn('   Verify a domain at https://resend.com/domains — otherwise Resend only delivers to your own account email.')
+    }
+    if (testRecipient) {
+      console.log(`\nSending test email via Resend to: ${testRecipient}...`)
+      const ok = await sendViaResend({
+        to: testRecipient,
+        subject: 'Eduzyra SMTP Diagnostic Test',
+        html: '<p>This is a test email verifying that Eduzyra email delivery is operational.</p>',
+      })
+      if (!ok) {
+        console.error('❌ Failed to deliver test email via Resend (see error above).')
+        process.exit(1)
+      }
+      console.log('✅ Test email accepted by Resend!')
+    } else {
+      console.log('\n💡 Tip: You can send a test email by running:')
+      console.log('   node scripts/diag-smtp.mjs your-email@example.com\n')
+    }
+    process.exit(0)
+  }
+
   if (!effectiveUser || !rawPass) {
     console.error('\n❌ ERROR: SMTP credentials missing!')
     console.error('Please configure SMTP_USER (or EMAIL_USER) and SMTP_PASS (or EMAIL_PASS) in .env or Render environment.')
@@ -66,12 +100,14 @@ async function run() {
       console.error('  3. Use the App Password instead of your normal Google login password.')
     } else if (err.code === 'ETIMEDOUT' || err.message.includes('timeout')) {
       console.error('\n💡 HINT (Connection Timeout):')
-      console.error('  Render or network may be blocking port 587. Check port 465 (SSL).')
+      console.error('  The SMTP handshake never completed — the network is dropping it.')
+      console.error('  On Render FREE tier this is expected: outbound SMTP ports 25/465/587')
+      console.error('  are blocked (https://render.com/changelog/free-web-services-will-no-longer-allow-outbound-traffic-to-smtp-ports).')
+      console.error('  Fix: set RESEND_API_KEY (HTTPS email API, works on free tier) or upgrade Render to a paid instance.')
     }
     process.exit(1)
   }
 
-  const testRecipient = process.argv[2]
   if (testRecipient) {
     console.log(`\nSending test email to: ${testRecipient}...`)
     try {
