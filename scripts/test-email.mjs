@@ -1,46 +1,55 @@
 #!/usr/bin/env node
 import 'dotenv/config'
-import { verifySmtpConnection, sendWelcomeEmail } from '../src/services/emailService.js'
+import { verifyBrevoConnection, sendWelcomeEmail } from '../src/services/emailService.js'
+
+function maskSecret(str) {
+  if (!str) return '(not set)'
+  if (str.length <= 8) return '****'
+  return `${str.slice(0, 7)}***${str.slice(-4)}`
+}
+
+function maskEmail(email) {
+  if (!email) return '(not set)'
+  const [user, domain] = email.split('@')
+  if (!domain) return maskSecret(email)
+  const maskedUser = user.length > 2 ? `${user.slice(0, 2)}***` : `${user}***`
+  return `${maskedUser}@${domain}`
+}
 
 async function run() {
   console.log('───────────────────────────────────────────────────────')
-  console.log('  Eduzyra SMTP Email Diagnostic & Verification Tool')
+  console.log('  Eduzyra Brevo Email Diagnostic & Verification Tool')
   console.log('───────────────────────────────────────────────────────\n')
 
-  const user = process.env.SMTP_USER || process.env.EMAIL_USER
-  const host = process.env.SMTP_HOST || 'smtp.gmail.com'
-  const port = process.env.SMTP_PORT || '587'
-  const hasPass = Boolean(process.env.SMTP_PASS || process.env.EMAIL_PASS)
+  const apiKey = (process.env.BREVO_API_KEY || '').trim()
+  const fromName = (process.env.EMAIL_FROM_NAME || 'Eduzyra').trim()
+  const fromAddress = (process.env.EMAIL_FROM_ADDRESS || process.env.BREVO_SENDER_EMAIL || '').trim()
 
-  console.log(`SMTP Host: ${host}:${port}`)
-  console.log(`Account:   ${user ? user : '(not configured)'}`)
-  console.log(`Password:  ${hasPass ? 'configured (16-char app password)' : '(not configured)'}\n`)
+  console.log(`Service:  Brevo Transactional REST API (HTTPS / port 443)`)
+  console.log(`API Key:  ${maskSecret(apiKey)}`)
+  console.log(`Sender:   "${fromName}" <${fromAddress ? maskEmail(fromAddress) : 'contact@eduzyra.com'}>\n`)
 
-  if (!user || !hasPass) {
-    console.error('❌ Missing credentials in .env:')
-    console.error('   Please define either:')
-    console.error('     EMAIL_USER=your_eduzyra_email@gmail.com')
-    console.error('     EMAIL_PASS=your_16_digit_app_password')
-    console.error('   OR:')
-    console.error('     SMTP_USER=your_eduzyra_email@gmail.com')
-    console.error('     SMTP_PASS=your_16_digit_app_password\n')
+  if (!apiKey) {
+    console.error('❌ Missing BREVO_API_KEY in .env:')
+    console.error('   Please define:')
+    console.error('     BREVO_API_KEY=xkeysib-your-v3-api-key\n')
     process.exit(1)
   }
 
-  console.log('Connecting to SMTP server and verifying authentication...')
-  const result = await verifySmtpConnection()
+  console.log('Connecting to Brevo API and verifying authentication...')
+  const result = await verifyBrevoConnection()
 
   if (!result.success) {
-    console.error('\n❌ SMTP Verification FAILED!')
+    console.error('\n❌ Brevo Verification FAILED!')
     console.error(`   Error details: ${result.error}`)
-    console.error('\nTroubleshooting tips for Gmail:')
-    console.error(' 1. Ensure 2-Step Verification is turned ON for the Google account.')
-    console.error(' 2. Verify that you generated an "App Password" (not your main Google password).')
-    console.error(' 3. Ensure the App Password is 16 characters with no extra spaces.')
+    console.error('\nTroubleshooting tips for Brevo:')
+    console.error(' 1. Verify that your API key starts with "xkeysib-".')
+    console.error(' 2. Confirm the key has permissions for transactional emails in https://app.brevo.com/settings/keys/api.')
+    console.error(' 3. Ensure your sender email or domain is verified in https://app.brevo.com/senders.')
     process.exit(1)
   }
 
-  console.log('✅ SMTP connection and authentication SUCCESSFUL!\n')
+  console.log('✅ Brevo connection and authentication SUCCESSFUL!\n')
 
   const recipient = process.argv[2]
   if (recipient) {
@@ -62,4 +71,7 @@ async function run() {
   }
 }
 
-run()
+run().catch((err) => {
+  console.error('Unexpected error:', err)
+  process.exit(1)
+})

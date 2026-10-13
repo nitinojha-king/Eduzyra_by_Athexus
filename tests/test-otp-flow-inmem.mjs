@@ -1,17 +1,16 @@
 import assert from 'node:assert/strict'
 import { MongoMemoryServer } from 'mongodb-memory-server'
 import mongoose from 'mongoose'
-import nodemailer from 'nodemailer'
 import app from '../src/app.js'
 import User from '../src/models/User.js'
 import PendingSignup from '../src/models/PendingSignup.js'
-import { getTransporter, resetTransporter, setTransporter } from '../src/services/emailService.js'
+import { getBrevoConfig, setMockSender, resetTransporter } from '../src/services/emailService.js'
 import { hashOtp } from '../src/utils/otp.js'
 
 /**
  * End-to-End In-Memory Test Suite:
  * Signup staged in PendingSignup, OTP generation, verification, resend, and
- * SMTP configuration flow.
+ * Brevo configuration flow.
  */
 async function runTests() {
   console.log('\n======================================================')
@@ -36,54 +35,43 @@ async function runTests() {
   let failed = false
   try {
     // -------------------------------------------------------------
-    // Test 1: Configuration & Aliases (EMAIL_USER / EMAIL_PASS)
+    // Test 1: Configuration & Sender Defaults (Brevo)
     // -------------------------------------------------------------
-    console.log('\n[Test 1] Verifying SMTP environment variable aliases & Google App Password formatting...')
+    console.log('\n[Test 1] Verifying Brevo API configuration & sender defaults...')
     resetTransporter()
-    process.env.EMAIL_USER = 'testteacher@gmail.com'
-    process.env.EMAIL_PASS = 'abcd efgh ijkl mnop' // 16-char app password with spaces
-    delete process.env.SMTP_USER
-    delete process.env.SMTP_PASS
+    process.env.BREVO_API_KEY = 'xkeysib-mock-api-key-test-12345678'
+    process.env.EMAIL_FROM_NAME = 'Eduzyra Test'
+    process.env.EMAIL_FROM_ADDRESS = 'contact@eduzyra.com'
 
-    const transporter = getTransporter({ reload: true })
-    assert.equal(transporter.options.auth.user, 'testteacher@gmail.com', 'EMAIL_USER must be resolved')
-    assert.equal(transporter.options.auth.pass, 'abcdefghijklmnop', '16-char Google App Password spaces must be stripped')
-    assert.equal(transporter.options.service, 'gmail', 'Gmail service must be auto-detected for @gmail.com')
-    assert.equal(transporter.options.connectionTimeout, 30000, 'Connection timeout must be 30000ms')
-    console.log('✅ Test 1 Passed: EMAIL_USER/EMAIL_PASS and Gmail sanitization verified.')
+    const config = getBrevoConfig()
+    assert.equal(config.apiKey, 'xkeysib-mock-api-key-test-12345678', 'BREVO_API_KEY must be resolved')
+    assert.equal(config.sender.email, 'contact@eduzyra.com', 'EMAIL_FROM_ADDRESS must be resolved')
+    assert.equal(config.sender.name, 'Eduzyra Test', 'EMAIL_FROM_NAME must be resolved')
+    console.log('✅ Test 1 Passed: BREVO_API_KEY and sender configuration verified.')
 
     // -------------------------------------------------------------
     // Test 2: Missing Credentials Error Validation
     // -------------------------------------------------------------
-    console.log('\n[Test 2] Testing missing SMTP credentials error handling...')
+    console.log('\n[Test 2] Testing missing Brevo credentials error handling...')
     resetTransporter()
-    delete process.env.EMAIL_USER
-    delete process.env.EMAIL_PASS
-    delete process.env.SMTP_USER
-    delete process.env.SMTP_PASS
+    delete process.env.BREVO_API_KEY
 
     assert.throws(
-      () => getTransporter({ reload: true }),
-      /SMTP not configured — set SMTP_USER \/ EMAIL_USER and SMTP_PASS \/ EMAIL_PASS in .env/,
-      'Must throw clear error when credentials are missing',
+      () => getBrevoConfig(),
+      /Brevo not configured — set BREVO_API_KEY in .env/,
+      'Must throw clear error when BREVO_API_KEY is missing',
     )
     console.log('✅ Test 2 Passed: Missing credentials cleanly detected without leaking secrets.')
 
-    // Setup mock jsonTransport to capture outbound emails hermetically during test run
+    // Setup hermetic mock sender to capture outbound emails offline during test run
     const sentEmails = []
-    const mockTransport = nodemailer.createTransport({
-      jsonTransport: true,
+    setMockSender(async (options) => {
+      sentEmails.push(options)
+      return true
     })
-    const originalSendMail = mockTransport.sendMail.bind(mockTransport)
-    mockTransport.sendMail = async (options) => {
-      const result = await originalSendMail(options)
-      const parsed = JSON.parse(result.message)
-      sentEmails.push({ ...options, parsed })
-      return result
-    }
-    setTransporter(mockTransport)
-    process.env.EMAIL_USER = 'eduzyra.official@gmail.com'
-    process.env.EMAIL_PASS = 'mockpassword1234'
+    process.env.BREVO_API_KEY = 'xkeysib-mock-api-key-test-12345678'
+    process.env.EMAIL_FROM_NAME = 'Eduzyra'
+    process.env.EMAIL_FROM_ADDRESS = 'contact@eduzyra.com'
 
     // -------------------------------------------------------------
     // Test 3: Signup stages PendingSignup, stores hashed OTP & sends email
@@ -119,7 +107,7 @@ async function runTests() {
     assert.equal(sentEmails.length, 1, 'Exactly one OTP email must be dispatched')
     assert.equal(sentEmails[0].to, testUser.email, 'Email must be sent to registered user')
     assert.match(sentEmails[0].subject, /verification code/i, 'Subject must mention verification code')
-    assert.match(sentEmails[0].from, /eduzyra\.official@gmail\.com/, 'From header must match authenticated Gmail account')
+    assert.match(sentEmails[0].from, /contact@eduzyra\.com/, 'From header must match configured sender')
     console.log('✅ Test 3 Passed: Signup staged in PendingSignup, OTP hashed in DB, and OTP email delivered.')
 
     // -------------------------------------------------------------

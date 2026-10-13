@@ -1,34 +1,36 @@
-import nodemailer from 'nodemailer'
-
 /**
  * emailService — centralised outbound email for Eduzyra.
  *
- * Transport: SMTP (Gmail App Password OR Brevo SMTP — both work via the same
- * env vars: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS).
+ * Provider: Brevo (formerly Sendinblue) Transactional Email REST API.
+ * Endpoint: POST https://api.brevo.com/v3/smtp/email
  *
- * On hosts where outbound SMTP is blocked (e.g. Render free tier blocks ports
- * 25/465/587), set RESEND_API_KEY instead: mail is then sent through the
- * Resend HTTPS API, which takes precedence over SMTP when configured.
+ * Why REST API instead of SMTP:
+ * Cloud platforms (such as Render) commonly throttle or block outbound SMTP
+ * ports (587, 465, 25), causing intermittent timeouts and connection drops.
+ * Brevo's REST API operates over standard HTTPS (port 443) with a strict
+ * 10-second timeout, ensuring maximum deliverability and resilience.
  *
- * Templates: all emails use inline-styled responsive HTML (email clients strip
- * <style> tags, so styles must be inline). Each function builds its own HTML
- * string with the Eduzyra header + body + footer.
+ * Required Environment Variables:
+ * - BREVO_API_KEY: Brevo v3 API key (starts with xkeysib-)
+ * - EMAIL_FROM_NAME: Display name (e.g. "Eduzyra")
+ * - EMAIL_FROM_ADDRESS: Verified sender email configured in your Brevo account
  *
- * Error handling: every function wraps the send in try/catch and logs failures
- * via console.error. Email failures NEVER throw — a failed welcome email must
- * not fail the signup response. The caller's try/catch is a second safety net.
+ * Error Handling:
+ * Every email function wraps the send in try/catch and logs failures via
+ * console.error. Email failures NEVER throw — a failed welcome email must
+ * not fail the signup response.
  *
- * Amounts: all DB amounts are in paise. Divide by 100 before displaying.
- * Use formatRupees() helper below — never inline the math.
- *
- * Security: all user-supplied values (name, email, message, courseTitle) are
- * HTML-escaped via the escapeHtml() helper before interpolation into templates.
- * This prevents HTML/script injection in email clients.
+ * Security:
+ * All user-supplied values (name, email, message, courseTitle) are
+ * HTML-escaped via escapeHtml() before interpolation into email templates.
  */
+
+const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email'
+const BREVO_ACCOUNT_URL = 'https://api.brevo.com/v3/account'
+const REQUEST_TIMEOUT_MS = 10000 // 10-second timeout requirement
 
 // ── HTML escaping helper ──────────────────────────────────────────────────
 // Escapes &, <, >, ", ' to prevent HTML injection in email templates.
-// Every user-supplied value MUST be passed through this before interpolation.
 function escapeHtml(str) {
   if (str == null) return ''
   return String(str)
@@ -39,110 +41,147 @@ function escapeHtml(str) {
     .replace(/'/g, '&#039;')
 }
 
-// ── Lazy transporter singleton ────────────────────────────────────────────
-// Lazily created on first send so the app can boot without SMTP configured.
-// The error only surfaces when an email is actually sent.
-let _transporter = null
+// ── Mock sender testing hook ──────────────────────────────────────────────
+let _mockSender = null
 
 /**
- * Resets and closes the active transporter instance.
- * Useful for testing, configuration reloading, and avoiding stale connections.
+ * Sets a custom mock email sender (used for hermetic offline tests).
+ * @param {Function|null} senderFn
  */
-export function resetTransporter() {
-  if (_transporter && typeof _transporter.close === 'function') {
-    try {
-      _transporter.close()
-    } catch {
-      // Ignore close error on reset
+export function setMockSender(senderFn) {
+  _mockSender = senderFn
+}
+
+export function resetMockSender() {
+  _mockSender = null
+}
+
+/**
+ * Backwards-compatibility helper for tests or modules expecting setTransporter.
+ * @param {object|Function|null} mock
+ */
+export function setTransporter(mock) {
+  if (!mock) {
+    _mockSender = null
+    return
+  }
+  if (typeof mock === 'function') {
+    _mockSender = mock
+  } else if (typeof mock.sendMail === 'function') {
+    _mockSender = async ({ to, subject, html, from }) => {
+      return mock.sendMail({ from, to, subject, html })
     }
   }
-  _transporter = null
+}
+
+export function resetTransporter() {
+  _mockSender = null
+}
+
+export function resetBrevoClient() {
+  _mockSender = null
+}
+
+// ── Configuration helpers ─────────────────────────────────────────────────
+
+export function getSender() {
+  const name = (process.env.EMAIL_FROM_NAME || 'Eduzyra').trim()
+  const email = (
+    process.env.EMAIL_FROM_ADDRESS ||
+    process.env.BREVO_SENDER_EMAIL ||
+    'contact@eduzyra.com'
+  ).trim()
+  return { name, email }
+}
+
+export function fromAddress() {
+  const sender = getSender()
+  return `"${escapeHtml(sender.name)}" <${sender.email}>`
+}
+
+export function getBrevoConfig() {
+  const apiKey = (process.env.BREVO_API_KEY || '').trim()
+  if (!apiKey) {
+    throw new Error('Brevo not configured — set BREVO_API_KEY in .env')
+  }
+  return {
+    apiKey,
+    sender: getSender(),
+  }
 }
 
 /**
- * Sets a custom or mock transporter (useful for unit/integration tests).
- * @param {object|null} transporter
+ * Backwards-compatible facade for code referencing getTransporter().
  */
-export function setTransporter(transporter) {
-  resetTransporter()
-  _transporter = transporter
-}
-
 export function getTransporter({ reload = false } = {}) {
   if (reload) {
     resetTransporter()
   }
-  if (_transporter) return _transporter
-
-  const user = (process.env.SMTP_USER || process.env.EMAIL_USER || '').trim()
-  let pass = (process.env.SMTP_PASS || process.env.EMAIL_PASS || '').trim()
-  const host = (process.env.SMTP_HOST || process.env.EMAIL_HOST || '').trim()
-  const port = Number(process.env.SMTP_PORT || process.env.EMAIL_PORT)
-  const service = (process.env.EMAIL_SERVICE || '').trim().toLowerCase()
-
-  if (!user || !pass) {
-    throw new Error('SMTP not configured — set SMTP_USER / EMAIL_USER and SMTP_PASS / EMAIL_PASS in .env')
+  const config = getBrevoConfig()
+  return {
+    options: {
+      auth: { user: config.sender.email, pass: config.apiKey },
+      apiKey: config.apiKey,
+      service: 'brevo',
+      connectionTimeout: REQUEST_TIMEOUT_MS,
+    },
+    verify: verifyBrevoConnection,
   }
-
-  // Google App Passwords are 16 characters often copied with spaces (e.g. "abcd efgh ijkl mnop").
-  // Automatically strip internal spaces so it authenticates cleanly.
-  if (pass.includes(' ') && pass.replace(/\s+/g, '').length === 16) {
-    pass = pass.replace(/\s+/g, '')
-  }
-
-  const isGmail =
-    service === 'gmail' ||
-    host === 'smtp.gmail.com' ||
-    (!host && (user.toLowerCase().endsWith('@gmail.com') || user.toLowerCase().endsWith('@googlemail.com')))
-
-  const baseConfig = {
-    auth: { user, pass },
-    // Reuse the connection instead of reconnecting per send.
-    pool: true,
-    maxConnections: 2,
-    maxMessages: 100,
-    // The previous 5000ms values are far too tight for SMTP from a PaaS: the
-    // TCP handshake to Gmail alone routinely exceeds 5s, and socketTimeout
-    // killed the connection mid-send while Gmail was accepting the message.
-    connectionTimeout: 30_000,
-    greetingTimeout: 30_000,
-    socketTimeout: 60_000,
-  }
-
-  if (isGmail) {
-    _transporter = nodemailer.createTransport({
-      ...baseConfig,
-      service: 'gmail',
-    })
-  } else {
-    const finalHost = host || 'smtp.gmail.com'
-    const finalPort = port || 587
-    _transporter = nodemailer.createTransport({
-      ...baseConfig,
-      host: finalHost,
-      port: finalPort,
-      secure: finalPort === 465,
-      // Upgrade to TLS on plaintext ports instead of sending credentials in the clear.
-      requireTLS: finalPort !== 465,
-    })
-  }
-
-  return _transporter
 }
 
 /**
- * Verifies SMTP connection and authentication credentials.
- * @returns {Promise<{success: boolean, error?: string}>}
+ * Verifies Brevo API key validity and account status.
+ * @returns {Promise<{success: boolean, error?: string, account?: object}>}
  */
-export async function verifySmtpConnection() {
+export async function verifyBrevoConnection() {
   try {
-    const transporter = getTransporter()
-    await transporter.verify()
-    return { success: true }
+    const { apiKey } = getBrevoConfig()
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => {
+      controller.abort(new Error(`Brevo verification timed out after ${REQUEST_TIMEOUT_MS}ms`))
+    }, REQUEST_TIMEOUT_MS)
+
+    let response
+    try {
+      response = await fetch(BREVO_ACCOUNT_URL, {
+        method: 'GET',
+        headers: {
+          accept: 'application/json',
+          'api-key': apiKey,
+        },
+        signal: controller.signal,
+      })
+    } finally {
+      clearTimeout(timeoutId)
+    }
+
+    if (!response.ok) {
+      const errBody = await response.json().catch(() => ({}))
+      const msg = errBody?.message || response.statusText || `HTTP ${response.status}`
+      return {
+        success: false,
+        error: `Brevo authentication failed (${response.status}): ${msg}`,
+      }
+    }
+
+    const account = await response.json()
+    return {
+      success: true,
+      account: {
+        email: account.email,
+        companyName: account.companyName,
+        plan: account.plan,
+      },
+    }
   } catch (err) {
-    return { success: false, error: err?.message || String(err) }
+    return {
+      success: false,
+      error: err?.message || String(err),
+    }
   }
 }
+
+export const verifySmtpConnection = verifyBrevoConnection
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -198,212 +237,81 @@ function emailWrapper(title, bodyHtml) {
 </html>`
 }
 
-/** Get the FROM address from env, ensuring Gmail sender requirements are met. */
-function fromAddress() {
-  const name = process.env.EMAIL_FROM_NAME || 'Eduzyra'
-  const authUser = (process.env.SMTP_USER || process.env.EMAIL_USER || '').trim()
-  const configuredFrom = (process.env.EMAIL_FROM_ADDRESS || '').trim()
-
-  const isGmailAuth =
-    authUser.toLowerCase().endsWith('@gmail.com') ||
-    authUser.toLowerCase().endsWith('@googlemail.com') ||
-    (process.env.EMAIL_SERVICE || '').trim().toLowerCase() === 'gmail' ||
-    (process.env.SMTP_HOST || '').trim().toLowerCase() === 'smtp.gmail.com'
-
-  // If using Gmail SMTP and configuredFrom is empty or a default placeholder (.dev, example.com, etc.),
-  // always use the authenticated Gmail user to adhere to Gmail sender policy and prevent SPF/rejection.
-  let addr = configuredFrom
-  if (isGmailAuth) {
-    if (!addr || addr.includes('eduzyra.dev') || addr.includes('example.com') || !addr.includes('@')) {
-      addr = authUser
-    }
-  } else if (!addr) {
-    addr = authUser || 'noreply@eduzyra.dev'
-  }
-
-  return `"${escapeHtml(name)}" <${addr}>`
-}
-
-// ── Error classification ──────────────────────────────────────────────────
-// SMTP failures that are worth one automatic retry: timeouts and dropped
-// connections on a hosted network. Auth/permission errors are NOT retried —
-// a 535 from Gmail will fail again immediately.
-const RETRYABLE_SMTP_CODES = new Set([
-  'ETIMEDOUT',
-  'ECONNRESET',
-  'ECONNREFUSED',
-  'EAI_AGAIN',
-  'ENOTFOUND',
-  'ESOCKET',
-  'EPIPE',
-])
-
-function isRetryableSmtpError(err) {
-  return RETRYABLE_SMTP_CODES.has(err?.code)
-}
-
-// ── Resend HTTP API provider ────────────────────────────────────────────────
-// Render's free tier blocks outbound SMTP (ports 25/465/587) at the network
-// level, so nodemailer can never connect from there (ETIMEDOUT). The Resend
-// HTTPS API (port 443) is NOT blocked and works on free Render instances.
-//
-// Precedence: when RESEND_API_KEY is set, ALL mail goes through Resend and
-// SMTP is never touched. Otherwise the SMTP transporter path below is used.
-//
-// Setup: create a free key at https://resend.com/api-keys, verify a sending
-// domain in the Resend dashboard, and set EMAIL_FROM_ADDRESS to an address on
-// that domain. NOTE: without a verified domain Resend only delivers to the
-// account owner's own address (testing mode) — OTP mail to real users will
-// be rejected with a 403 until the domain is verified.
-function usingResend() {
-  return Boolean((process.env.RESEND_API_KEY || '').trim())
-}
-
-let _warnedResendFrom = false
-
-function resendFromAddress() {
-  const name = process.env.EMAIL_FROM_NAME || 'Eduzyra'
-  const configured = (process.env.EMAIL_FROM_ADDRESS || '').trim()
-  const smtpUser = (process.env.SMTP_USER || process.env.EMAIL_USER || '').trim()
-
-  const addr = configured || smtpUser || 'noreply@eduzyra.dev'
-  // Only warn when falling back: an explicitly configured EMAIL_FROM_ADDRESS
-  // is trusted (the owner pointed it at their verified Resend domain).
-  if (!configured && !_warnedResendFrom) {
-    _warnedResendFrom = true
-    console.warn(
-      '[emailService] Sending via Resend but EMAIL_FROM_ADDRESS is not set ' +
-        `(${addr}). Verify a domain at https://resend.com/domains and set EMAIL_FROM_ADDRESS to it, ` +
-        'or delivery to other recipients will fail.'
-    )
-  }
-  return `"${escapeHtml(name)}" <${addr}>`
-}
-
-/** Send one email through the Resend HTTPS API. Returns true on acceptance. */
-export async function sendViaResend({ to, subject, html }) {
-  const apiKey = (process.env.RESEND_API_KEY || '').trim()
+/** Centralised send — dispatches via Brevo REST API with 10s timeout, logs failures. */
+async function send({ to, subject, html }) {
   try {
-    const res = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        from: resendFromAddress(),
-        to: [to],
-        subject,
-        html,
-      }),
-    })
-    if (!res.ok) {
-      const body = await res.text().catch(() => '')
-      console.error('[emailService] Resend API rejected the email:', {
+    const sender = getSender()
+    const formattedFrom = fromAddress()
+
+    // Offline testing hook for hermetic unit/integration tests
+    if (_mockSender) {
+      await _mockSender({
         to,
         subject,
-        status: res.status,
-        error: body.slice(0, 500),
+        html,
+        from: formattedFrom,
+        sender,
       })
-      return false
-    }
-    return true
-  } catch (err) {
-    console.error('[emailService] Resend API request failed:', {
-      to,
-      subject,
-      code: err?.code,
-      error: err?.message || String(err),
-    })
-    return false
-  }
-}
-
-/** Centralised send — wraps transporter.sendMail in try/catch, logs failures. */
-async function send({ to, subject, html }) {
-  // Resend (HTTPS) takes precedence — it works where SMTP ports are blocked
-  // (e.g. Render free tier). SMTP is only used when no Resend key is set.
-  if (usingResend()) {
-    return sendViaResend({ to, subject, html })
-  }
-
-  const isMissingSmtp = () => {
-    try {
-      getTransporter()
-      return false
-    } catch {
       return true
     }
-  }
 
-  try {
-    const transporter = getTransporter()
-    await transporter.sendMail({
-      from: fromAddress(),
-      to,
-      subject,
-      html,
-    })
+    const { apiKey } = getBrevoConfig()
+
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => {
+      controller.abort(new Error(`Brevo API request timed out after ${REQUEST_TIMEOUT_MS}ms`))
+    }, REQUEST_TIMEOUT_MS)
+
+    let response
+    try {
+      response = await fetch(BREVO_API_URL, {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'api-key': apiKey,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          sender,
+          to: [{ email: to }],
+          subject,
+          htmlContent: html,
+        }),
+        signal: controller.signal,
+      })
+    } finally {
+      clearTimeout(timeoutId)
+    }
+
+    if (!response.ok) {
+      const errBody = await response.json().catch(() => ({}))
+      const msg = errBody?.message || response.statusText || `HTTP ${response.status}`
+      throw new Error(`Brevo API error (${response.status}): ${msg}`)
+    }
+
     return true
   } catch (err) {
     const errorMessage = err?.message || String(err)
+    const isMissingConfig = errorMessage.includes('Brevo not configured')
 
-    if (isMissingSmtp()) {
-      if (process.env.NODE_ENV !== 'production') {
-        console.warn('[emailService] SMTP not configured. Dev fallback: email content logged to console.')
-        console.group('[emailService] DEV EMAIL OUTPUT')
-        console.log('to:', to)
-        console.log('subject:', subject)
-        console.log('html:', html)
-        console.groupEnd()
-        return true
-      }
+    if (isMissingConfig && process.env.NODE_ENV === 'test') {
+      return true
+    }
 
-      console.error('[emailService] SMTP not configured — email NOT sent. Set SMTP_USER / EMAIL_USER and SMTP_PASS / EMAIL_PASS.', {
-        to,
-        subject,
-      })
+    if (isMissingConfig && process.env.NODE_ENV !== 'production') {
+      console.warn('[emailService] Brevo not configured. Dev fallback: email content logged to console.')
+      console.group('[emailService] DEV EMAIL OUTPUT')
+      console.log('to:', to)
+      console.log('subject:', subject)
+      console.log('html:', html)
+      console.groupEnd()
       return false
     }
 
-    if (isRetryableSmtpError(err)) {
-      console.warn('[emailService] Transient SMTP failure — retrying once:', {
-        to,
-        subject,
-        code: err?.code,
-        error: errorMessage,
-      })
-      try {
-        // A pooled connection can go stale after the failure — drop it so the
-        // retry dials a fresh one.
-        _transporter?.close?.()
-        _transporter = null
-        const transporter = getTransporter()
-        await transporter.sendMail({ from: fromAddress(), to, subject, html })
-        return true
-      } catch (retryErr) {
-        console.error('[emailService] Failed to send email (retry gave up):', {
-          to,
-          subject,
-          code: retryErr?.code,
-          responseCode: retryErr?.responseCode,
-          response: retryErr?.response,
-          error: retryErr?.message || String(retryErr),
-        })
-        return false
-      }
-    }
-
-    // Non-retryable: bad credentials, rejected sender, blocked recipient.
-    // The responseCode/response pair is where Gmail states the real reason.
     console.error('[emailService] Failed to send email:', {
       to,
       subject,
-      code: err?.code,
-      responseCode: err?.responseCode,
-      response: err?.response,
       error: errorMessage,
-      ...(isMissingSmtp() ? { hint: 'SMTP credentials are missing or incomplete.' } : {}),
     })
     return false
   }
@@ -596,7 +504,7 @@ export async function sendCouponEmail({ name, email, couponCode, discount, expir
 }
 
 /**
- * Contact form email — sent to the platform admin's FROM address.
+ * Contact form email — sent to the platform admin's configured address.
  * @param {{name: string, email: string, message: string}} args
  */
 export async function sendContactEmail({ name, email, message }) {
@@ -606,7 +514,6 @@ export async function sendContactEmail({ name, email, message }) {
      <p style="margin:0 0 8px;font-size:13px;color:#64748b;">From: <strong style="color:#12213B;">${escapeHtml(email)}</strong></p>
      <p style="margin:16px 0 8px;font-size:14px;color:#1a202c;white-space:pre-wrap;">${escapeHtml(message)}</p>`
   )
-  const user = process.env.SMTP_USER || process.env.EMAIL_USER
-  const adminEmail = process.env.ADMIN_EMAIL || process.env.EMAIL_FROM_ADDRESS || user || 'noreply@eduzyra.dev'
+  const adminEmail = process.env.ADMIN_EMAIL || process.env.EMAIL_FROM_ADDRESS || 'contact@eduzyra.com'
   return send({ to: adminEmail, subject: `Contact: ${escapeHtml(name)}`, html })
 }
