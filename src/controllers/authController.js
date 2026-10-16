@@ -9,7 +9,13 @@ import { generateToken } from '../utils/generateToken.js'
 import { ApiError } from '../utils/ApiError.js'
 import { asyncHandler } from '../utils/asyncHandler.js'
 import { sendWelcomeEmail, sendPasswordResetEmail, sendOtpEmail } from '../services/emailService.js'
-import { generateOtp, hashOtp, OTP_TTL_MINUTES, OTP_RESEND_COOLDOWN_SECONDS, OTP_MAX_ATTEMPTS } from '../utils/otp.js'
+import {
+  generateOtp,
+  hashOtp,
+  getOtpTtlMinutes,
+  getOtpCooldownSeconds,
+  getOtpMaxAttempts,
+} from '../utils/otp.js'
 
 const devOtpCache = new Map()
 
@@ -18,12 +24,13 @@ function storeDevOtp(email, otp, expiresAt) {
   const normalizedEmail = String(email || '').toLowerCase()
   if (!normalizedEmail) return
   devOtpCache.set(normalizedEmail, { otp, expiresAt })
+  const ttlMs = getOtpTtlMinutes() * 60 * 1000 + 60 * 1000
   setTimeout(() => {
     const existing = devOtpCache.get(normalizedEmail)
     if (existing && existing.expiresAt.getTime() === expiresAt.getTime()) {
       devOtpCache.delete(normalizedEmail)
     }
-  }, OTP_TTL_MINUTES * 60 * 1000 + 60 * 1000)
+  }, ttlMs)
 }
 
 function clearDevOtp(email) {
@@ -43,12 +50,12 @@ function pendingSignupExpiry() {
 function isWithinResendCooldown(lastSentAt) {
   if (!lastSentAt) return false
   const secondsSinceLast = (Date.now() - new Date(lastSentAt).getTime()) / 1000
-  return secondsSinceLast < OTP_RESEND_COOLDOWN_SECONDS
+  return secondsSinceLast < getOtpCooldownSeconds()
 }
 
 function resendCooldownError(lastSentAt) {
   const secondsSinceLast = (Date.now() - new Date(lastSentAt).getTime()) / 1000
-  const waitSeconds = Math.ceil(OTP_RESEND_COOLDOWN_SECONDS - secondsSinceLast)
+  const waitSeconds = Math.ceil(getOtpCooldownSeconds() - secondsSinceLast)
   return new ApiError(429, `Please wait ${waitSeconds}s before requesting another code.`, 'OTP_COOLDOWN')
 }
 
@@ -60,8 +67,9 @@ function resendCooldownError(lastSentAt) {
 // Returns the raw code only for dev-only callers; production ignores it.
 async function issueOtpForPending(pending) {
   const otp = generateOtp()
+  const ttlMinutes = getOtpTtlMinutes()
   pending.otpCode = hashOtp(otp)
-  pending.otpExpires = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000)
+  pending.otpExpires = new Date(Date.now() + ttlMinutes * 60 * 1000)
   pending.otpAttempts = 0
   pending.otpLastSentAt = new Date()
   pending.expiresAt = pendingSignupExpiry()
@@ -75,7 +83,7 @@ async function issueOtpForPending(pending) {
     name: pending.name,
     email: pending.email,
     otp,
-    ttlMinutes: OTP_TTL_MINUTES,
+    ttlMinutes,
   })
 
   if (!sent) {
@@ -125,6 +133,7 @@ export const signup = asyncHandler(async (req, res) => {
 
   // Retrying signup re-issues the code on the existing staged record instead
   // of failing with a 409 — the address is not yet a real account.
+  // The staged name/password are refreshed so a corrected retry actually takes effect.
   let staged = await PendingSignup.findOne({ email: normalizedEmail })
   if (!staged) {
     staged = await PendingSignup.create({
@@ -134,6 +143,9 @@ export const signup = asyncHandler(async (req, res) => {
       role: 'student',
       expiresAt: pendingSignupExpiry(),
     })
+  } else {
+    staged.name = name
+    staged.passwordHash = passwordHash
   }
 
   const otpSent = await issueOtpForPending(staged)
@@ -173,7 +185,7 @@ export const verifyOtp = asyncHandler(async (req, res) => {
     throw new ApiError(400, 'This code has expired. Request a new one.', 'OTP_EXPIRED')
   }
 
-  if (pending.otpAttempts >= OTP_MAX_ATTEMPTS) {
+  if (pending.otpAttempts >= getOtpMaxAttempts()) {
     throw new ApiError(429, 'Too many incorrect attempts. Request a new code.', 'OTP_LOCKED')
   }
 
@@ -244,7 +256,7 @@ async function verifyLegacyUser(user, otp, res) {
     throw new ApiError(400, 'This code has expired. Request a new one.', 'OTP_EXPIRED')
   }
 
-  if (user.otpAttempts >= OTP_MAX_ATTEMPTS) {
+  if (user.otpAttempts >= getOtpMaxAttempts()) {
     throw new ApiError(429, 'Too many incorrect attempts. Request a new code.', 'OTP_LOCKED')
   }
 
@@ -405,11 +417,9 @@ export const getMe = asyncHandler(async (req, res) => {
 //
 // Security: This endpoint NEVER returns the raw reset token to the client.
 // The token is only stored on the User document as a SHA-256 hash
-// (resetPasswordToken) and is intended to be delivered to the user via a
-// secure out-of-band channel (email). The email service is not yet wired
-// up — until it is, password reset cannot be completed end-to-end. The
-// response is intentionally identical whether or not the email exists, to
-// prevent account enumeration.
+// (resetPasswordToken) and is delivered to the user via Brevo email
+// (sendPasswordResetEmail). The response is intentionally identical whether
+// or not the email exists, to prevent account enumeration.
 export const forgotPassword = asyncHandler(async (req, res) => {
   const { email } = req.validatedBody || req.body
 
@@ -426,27 +436,30 @@ export const forgotPassword = asyncHandler(async (req, res) => {
   await user.save()
 
   // ⚠️  The raw token is intentionally NOT included in the response.
-  //     It must only be delivered via email (to be wired up separately).
-  //     Returning it here would allow anyone who knows a user's email to
-  //     take over their account (full account takeover vulnerability).
+  //     It is only delivered via email. Returning it here would allow anyone
+  //     who knows a user's email to take over their account.
   //
-  // Email delivery: send the reset link via emailService. If SMTP is not
-  // configured, fall back to a dev-only console.warn so the developer can
-  // still test the reset flow end-to-end. This is the ONLY place the raw
-  // token may appear in any output — never in an HTTP response.
-  const resetUrl = `${process.env.CLIENT_ORIGIN}/reset-password?token=${rawToken}`
+  // CLIENT_ORIGIN may be a comma-separated allowlist — the reset link uses
+  // the first entry (the canonical frontend URL).
+  const frontendBase = String(process.env.CLIENT_ORIGIN || 'http://localhost:5173')
+    .split(',')[0]
+    .trim()
+    .replace(/\/+$/, '')
+  const resetUrl = `${frontendBase}/reset-password?token=${rawToken}`
   try {
-    await sendPasswordResetEmail({ name: user.name, email: user.email, resetUrl })
+    await sendPasswordResetEmail({ name: user.name, email: user.email, resetUrl, ttlMinutes })
   } catch (err) {
-    // sendPasswordResetEmail already logs internally; this catch is a safety net.
+    // sendPasswordResetEmail never throws (it returns false on failure), but
+    // this catch is a safety net against unexpected errors.
     console.error('[forgotPassword] sendPasswordResetEmail threw:', err?.message || err)
   }
 
-  // Dev fallback: if SMTP wasn't configured (sendPasswordResetEmail failed
-  // silently), log the reset URL so the developer can test.
-  const hasSmtpConfig = Boolean((process.env.SMTP_USER || process.env.EMAIL_USER) && (process.env.SMTP_PASS || process.env.EMAIL_PASS))
-  if (process.env.NODE_ENV !== 'production' && !hasSmtpConfig) {
-    console.warn('[forgotPassword] SMTP not configured — reset link not sent. Token expires in', ttlMinutes, 'min.')
+  // Dev fallback: if Brevo isn't configured, log the reset URL so the
+  // developer can still test the reset flow end-to-end. This is the ONLY
+  // place the raw token may appear in any output — never in an HTTP response.
+  const hasBrevoConfig = Boolean((process.env.BREVO_API_KEY || '').trim())
+  if (process.env.NODE_ENV !== 'production' && !hasBrevoConfig) {
+    console.warn('[forgotPassword] BREVO_API_KEY not configured — reset email not sent. Token expires in', ttlMinutes, 'min.')
     console.warn('[forgotPassword] DEBUG reset URL:', resetUrl)
   }
 

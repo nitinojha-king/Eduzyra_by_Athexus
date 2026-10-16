@@ -73,7 +73,7 @@ export const issueCertificate = asyncHandler(async (req, res) => {
   })
 
   if (!emailSent) {
-    console.warn('[issueCertificate] Certificate email delivery failed. Check SMTP configuration or review server logs for dev fallback information.')
+    console.warn('[issueCertificate] Certificate email delivery failed. Check BREVO_API_KEY / EMAIL_FROM_ADDRESS or review server logs for dev fallback information.')
   }
 
   // Create in-app notification (fire-and-forget)

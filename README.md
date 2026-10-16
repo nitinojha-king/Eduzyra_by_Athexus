@@ -6,7 +6,7 @@ Express + MongoDB API for the Eduzyra e-learning platform: JWT auth with email-O
 
 - Node.js 20 + Express 4
 - MongoDB + Mongoose 8
-- Auth: `jsonwebtoken` + `bcryptjs`, email OTP via `nodemailer`
+- Auth: `jsonwebtoken` + `bcryptjs`, email OTP via Brevo REST API (HTTPS)
 - Payments: `razorpay` (orders + HMAC webhook verification)
 - Uploads: `multer` → `sharp` → `cloudinary`
 - Hardening: `helmet`, `express-rate-limit`, `express-mongo-sanitize`, `cors` allowlist, `zod` validation
@@ -16,7 +16,7 @@ Express + MongoDB API for the Eduzyra e-learning platform: JWT auth with email-O
 ```bash
 npm ci
 cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
-# Edit .env: MONGO_URI, JWT_SECRET, CLIENT_ORIGIN, Razorpay/SMTP/Cloudinary keys
+# Edit .env: MONGO_URI, JWT_SECRET, CLIENT_ORIGIN, Razorpay/Brevo/Cloudinary keys
 npm run seed                # courses + coupons + demo admin (admin@eduzyra.dev / ChangeMe123!)
 npm run dev                 # http://localhost:5000 (nodemon)
 ```
@@ -43,8 +43,7 @@ All vars are documented in [`.env.example`](.env.example). Never commit `.env` �
 | Auth | `JWT_SECRET`, `JWT_EXPIRES_IN`, `COOKIE_SECRET`, `RESET_TOKEN_TTL_MINUTES`, `LOGIN_MAX_ATTEMPTS`, `LOGIN_LOCK_MINUTES` |
 | OTP | `OTP_TTL_MINUTES`, `OTP_RESEND_COOLDOWN_SECONDS`, `OTP_MAX_ATTEMPTS` |
 | Razorpay | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `CURRENCY` |
-| Email (SMTP) | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM_NAME`, `EMAIL_FROM_ADDRESS`, `ADMIN_EMAIL` |
-| Email (Resend HTTP) | `RESEND_API_KEY` — takes precedence over SMTP. **Required on Render free tier**, which blocks outbound SMTP ports 25/465/587. Verify a sending domain at resend.com/domains and point `EMAIL_FROM_ADDRESS` at it. |
+| Email (Brevo REST API) | `BREVO_API_KEY`, `EMAIL_FROM_NAME`, `EMAIL_FROM_ADDRESS` (verified sender), `ADMIN_EMAIL` — HTTPS API (port 443), works on Render free tier where SMTP ports are blocked |
 | Cloudinary | `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`, `CLOUDINARY_FOLDER` |
 
 Generate secrets with `node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"`.
@@ -199,7 +198,7 @@ docs/                     # feature notes (e.g. CERTIFICATE_TESTING.md)
 
 ## Deployment
 
-- **Render / single container:** `npm ci --omit=dev && node server.js`. Set `NODE_ENV=production`, `CLIENT_ORIGIN=https://<frontend>`, `MONGO_URI`, `JWT_SECRET`, Razorpay/SMTP/Cloudinary vars. Health check path: `/api/health`. **On the free tier, SMTP (nodemailer) cannot work** — Render blocks ports 25/465/587, so set `RESEND_API_KEY` instead (HTTPS email API).
+- **Render / single container:** `npm ci --omit=dev && node server.js`. Set `NODE_ENV=production`, `CLIENT_ORIGIN=https://<frontend>`, `MONGO_URI`, `JWT_SECRET`, Razorpay/Brevo/Cloudinary vars. Health check path: `/api/health`. Email uses the Brevo HTTPS API (port 443), which works on the free tier where SMTP ports 25/465/587 are blocked — set `BREVO_API_KEY` + verified `EMAIL_FROM_ADDRESS`.
 - **Docker:** `docker build -t eduzyra-backend . && docker run -p 5000:5000 --env-file .env eduzyra-backend`. Multi-stage build installs Sharp's `vips` deps; runs as non-root with a `HEALTHCHECK` on `/api/health`.
 - **PM2 (VPS):** `npm run start:prod` (cluster, `ecosystem.config.cjs`). With `instances: max`, front with Redis if you raise rate limits — `express-rate-limit` MemoryStore is per-process.
 - **Razorpay webhook:** expose `POST /api/payments/webhook`, paste the URL + secret into Dashboard → Settings → Webhooks, subscribe to `payment.captured`, `payment.failed`, `refund.processed`.

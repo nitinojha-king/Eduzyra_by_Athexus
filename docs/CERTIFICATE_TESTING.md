@@ -78,7 +78,7 @@ npm run dev
 
 #### Step 3: Check Certificate
 - A certificate should be **automatically issued**
-- Check your email (if SMTP configured) or dashboard notifications
+- Check your email (if Brevo configured) or dashboard notifications
 - Download certificate at `/certificate/{certificateId}`
 
 #### Step 4: Verify Certificate via API
@@ -97,7 +97,7 @@ When a student's enrollment progress reaches **100%** for the first time:
    - Unique ID: `EDU-YYYY-XXXXX` format
    - Stores student name, course title, issuance date
 
-2. 📧 **Sends Email** (if SMTP configured)
+2. 📧 **Sends Email** (if Brevo configured)
    - Certificate ready notification
    - Download link included
 
@@ -158,20 +158,20 @@ The frontend at [Certificate.jsx](../Eduzyra-By-Althexus-frontend/src/pages/Cert
 - ✅ Responsive display
 
 ### Email Configuration
-To enable certificate emails, configure SMTP in `.env`:
+To enable certificate emails, configure Brevo in `.env`:
 ```
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=your-email@gmail.com
-SMTP_PASS=your-app-password
+BREVO_API_KEY=xkeysib-your-v3-api-key
+EMAIL_FROM_NAME=Eduzyra
+EMAIL_FROM_ADDRESS=noreply@yourdomain.com
 ```
+The sender address must be verified in Brevo (Senders & IP).
 
 ### Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
 | `ECONNREFUSED 127.0.0.1:27017` | Start MongoDB with `docker-compose up mongo -d` |
-| Certificate not emailed | Check SMTP config in `.env` and console logs |
+| Certificate not emailed | Check BREVO_API_KEY / EMAIL_FROM_ADDRESS in `.env` and console logs |
 | Duplicate certificate | Use a unique enrollment record (each student+course pair gets one cert) |
 
 ---

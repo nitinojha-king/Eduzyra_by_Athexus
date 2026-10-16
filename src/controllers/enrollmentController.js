@@ -177,7 +177,7 @@ export const updateProgress = asyncHandler(async (req, res) => {
           })
 
           if (!emailSent) {
-            console.warn('[updateProgress] Certificate email delivery failed. Check SMTP configuration.')
+            console.warn('[updateProgress] Certificate email delivery failed. Check BREVO_API_KEY / EMAIL_FROM_ADDRESS.')
           } else {
             console.log('[updateProgress] Certificate email sent successfully')
           }

@@ -10,10 +10,12 @@
  * Brevo's REST API operates over standard HTTPS (port 443) with a strict
  * 10-second timeout, ensuring maximum deliverability and resilience.
  *
- * Required Environment Variables:
- * - BREVO_API_KEY: Brevo v3 API key (starts with xkeysib-)
- * - EMAIL_FROM_NAME: Display name (e.g. "Eduzyra")
- * - EMAIL_FROM_ADDRESS: Verified sender email configured in your Brevo account
+  * Required Environment Variables:
+  * - BREVO_API_KEY: Brevo v3 API key (starts with xkeysib-), from
+  *   https://app.brevo.com/settings/keys/api
+  * - EMAIL_FROM_NAME: Display name (e.g. "Eduzyra")
+  * - EMAIL_FROM_ADDRESS: Sender email VERIFIED in Brevo (https://app.brevo.com/senders).
+  *   Unverified senders are rejected by Brevo with HTTP 400.
  *
  * Error Handling:
  * Every email function wraps the send in try/catch and logs failures via
@@ -84,30 +86,55 @@ export function resetBrevoClient() {
 
 // ── Configuration helpers ─────────────────────────────────────────────────
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
 export function getSender() {
   const name = (process.env.EMAIL_FROM_NAME || 'Eduzyra').trim()
-  const email = (
-    process.env.EMAIL_FROM_ADDRESS ||
-    process.env.BREVO_SENDER_EMAIL ||
-    'contact@eduzyra.com'
-  ).trim()
+  // BREVO_SENDER_EMAIL is a legacy alias — EMAIL_FROM_ADDRESS is canonical.
+  const email = (process.env.EMAIL_FROM_ADDRESS || process.env.BREVO_SENDER_EMAIL || '').trim()
+
+  if (!email) {
+    // No sender configured. Fall back so dev/test can boot, but warn loudly —
+    // Brevo will reject this placeholder sender until a verified one is set.
+    if (process.env.NODE_ENV !== 'test') {
+      console.warn(
+        '[emailService] EMAIL_FROM_ADDRESS is not set — using placeholder "contact@eduzyra.com". ' +
+          'Set EMAIL_FROM_ADDRESS to a sender verified in Brevo (Senders & IP) or OTP/welcome emails will fail.',
+      )
+    }
+    return { name, email: 'contact@eduzyra.com' }
+  }
+
+  if (!EMAIL_RE.test(email) && process.env.NODE_ENV !== 'test') {
+    console.warn(`[emailService] EMAIL_FROM_ADDRESS "${email}" does not look like a valid email address.`)
+  }
   return { name, email }
 }
 
 export function fromAddress() {
   const sender = getSender()
-  return `"${escapeHtml(sender.name)}" <${sender.email}>`
+  // Email headers must NOT be HTML-escaped — only strip characters that would
+  // break the header (quotes / newlines). HTML-escaping belongs in the body.
+  const safeName = sender.name.replace(/["\r\n]/g, '').trim() || 'Eduzyra'
+  return `"${safeName}" <${sender.email}>`
 }
 
 export function getBrevoConfig() {
   const apiKey = (process.env.BREVO_API_KEY || '').trim()
   if (!apiKey) {
-    throw new Error('Brevo not configured — set BREVO_API_KEY in .env')
+    throw new Error('Brevo not configured — set BREVO_API_KEY in .env (get one at https://app.brevo.com/settings/keys/api)')
   }
-  return {
-    apiKey,
-    sender: getSender(),
+  if (!apiKey.startsWith('xkeysib-')) {
+    console.warn('[emailService] BREVO_API_KEY does not start with "xkeysib-" — it may be invalid or revoked.')
   }
+  const sender = getSender()
+  if (!EMAIL_RE.test(sender.email)) {
+    throw new Error(
+      `Brevo sender misconfigured — EMAIL_FROM_ADDRESS "${sender.email}" is not a valid email. ` +
+        'Set it to a sender verified in Brevo (https://app.brevo.com/senders).',
+    )
+  }
+  return { apiKey, sender }
 }
 
 /**
@@ -160,7 +187,7 @@ export async function verifyBrevoConnection() {
       const msg = errBody?.message || response.statusText || `HTTP ${response.status}`
       return {
         success: false,
-        error: `Brevo authentication failed (${response.status}): ${msg}`,
+        error: mapBrevoError(response.status, msg),
       }
     }
 
@@ -237,18 +264,59 @@ function emailWrapper(title, bodyHtml) {
 </html>`
 }
 
+/** Map a Brevo API failure to a clear, actionable message. */
+function mapBrevoError(status, rawMessage) {
+  const msg = rawMessage || `HTTP ${status}`
+  if (status === 401) {
+    return `Brevo authentication failed (401): invalid or revoked API key. Regenerate it at https://app.brevo.com/settings/keys/api. Details: ${msg}`
+  }
+  if (status === 400) {
+    return (
+      `Brevo rejected the request (400): this usually means the sender address is not verified ` +
+      `in Brevo (check https://app.brevo.com/senders) or a field is malformed. Details: ${msg}`
+    )
+  }
+  if (status === 402) {
+    return `Brevo quota exceeded (402): email credits exhausted. Check your Brevo plan. Details: ${msg}`
+  }
+  if (status === 429) {
+    return `Brevo rate limit hit (429): too many emails too fast — the request was throttled. Details: ${msg}`
+  }
+  return `Brevo API error (${status}): ${msg}`
+}
+
+/** Strip HTML tags to produce a plain-text fallback for deliverability. */
+function htmlToText(html) {
+  return String(html || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|h1|h2|div|tr|table)>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
 /** Centralised send — dispatches via Brevo REST API with 10s timeout, logs failures. */
 async function send({ to, subject, html }) {
   try {
+    if (!to || !EMAIL_RE.test(String(to).trim())) {
+      throw new Error(`Invalid recipient email address: "${to}"`)
+    }
+    const recipient = String(to).trim()
     const sender = getSender()
     const formattedFrom = fromAddress()
 
     // Offline testing hook for hermetic unit/integration tests
     if (_mockSender) {
       await _mockSender({
-        to,
+        to: recipient,
         subject,
         html,
+        text: htmlToText(html),
         from: formattedFrom,
         sender,
       })
@@ -273,9 +341,10 @@ async function send({ to, subject, html }) {
         },
         body: JSON.stringify({
           sender,
-          to: [{ email: to }],
+          to: [{ email: recipient }],
           subject,
           htmlContent: html,
+          textContent: htmlToText(html),
         }),
         signal: controller.signal,
       })
@@ -285,14 +354,14 @@ async function send({ to, subject, html }) {
 
     if (!response.ok) {
       const errBody = await response.json().catch(() => ({}))
-      const msg = errBody?.message || response.statusText || `HTTP ${response.status}`
-      throw new Error(`Brevo API error (${response.status}): ${msg}`)
+      const raw = errBody?.message || response.statusText || `HTTP ${response.status}`
+      throw new Error(mapBrevoError(response.status, raw))
     }
 
     return true
   } catch (err) {
     const errorMessage = err?.message || String(err)
-    const isMissingConfig = errorMessage.includes('Brevo not configured')
+    const isMissingConfig = errorMessage.includes('Brevo not configured') || errorMessage.includes('sender misconfigured')
 
     if (isMissingConfig && process.env.NODE_ENV === 'test') {
       return true
@@ -363,9 +432,9 @@ export async function sendOtpEmail({ name, email, otp, ttlMinutes }) {
 
 /**
  * Password reset email — sent on forgotPassword.
- * @param {{name: string, email: string, resetUrl: string}} args
+ * @param {{name: string, email: string, resetUrl: string, ttlMinutes?: number}} args
  */
-export async function sendPasswordResetEmail({ name, email, resetUrl }) {
+export async function sendPasswordResetEmail({ name, email, resetUrl, ttlMinutes = 30 }) {
   const html = emailWrapper(
     'Reset your Eduzyra password',
     `<h1 style="margin:0 0 16px;font-size:24px;color:#12213B;">Reset your password</h1>
@@ -376,7 +445,7 @@ export async function sendPasswordResetEmail({ name, email, resetUrl }) {
        <a href="${resetUrl}" style="display:inline-block;background-color:#00C2A8;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:8px;font-weight:600;font-size:14px;">Reset Password</a>
      </p>
      <p style="margin:16px 0 0;font-size:13px;color:#718096;">
-       This link expires in 30 minutes. If you didn't request this, you can safely ignore this email.
+       This link expires in ${escapeHtml(String(ttlMinutes))} minutes. If you didn't request this, you can safely ignore this email.
      </p>
      <p style="margin:16px 0 0;font-size:12px;color:#a0aec0;word-break:break-all;">
        Or copy this link: ${resetUrl}

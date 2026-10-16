@@ -12,7 +12,7 @@ We will acknowledge within 72 hours and coordinate a fix + disclosure timeline.
 ## Secrets hygiene
 
 - Never commit `.env` or any file containing `RAZORPAY_KEY_SECRET`, `JWT_SECRET`,
-  `SMTP_PASS`, or Cloudinary secrets. Only `.env.example` (placeholders) is tracked.
+  `BREVO_API_KEY`, or Cloudinary secrets. Only `.env.example` (placeholders) is tracked.
 - If a key leaks (git history, logs, screenshots), **rotate it immediately** at the
   provider — redacting the commit is not enough.
 - The local `.env` in this repo previously contained Razorpay **test** keys.
