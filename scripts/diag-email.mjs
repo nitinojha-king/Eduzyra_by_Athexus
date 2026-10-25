@@ -1,5 +1,5 @@
 import 'dotenv/config'
-import { verifyBrevoConnection, sendWelcomeEmail } from '../src/services/emailService.js'
+import { verifyBrevoConnection, sendEnrollmentConfirmationEmail } from '../src/services/emailService.js'
 
 function maskSecret(str) {
   if (!str) return '(not set)'
@@ -66,11 +66,13 @@ async function run() {
 
   const testRecipient = process.argv[2]
   if (testRecipient) {
-    console.log(`\nSending test welcome email via Brevo to: ${testRecipient}...`)
+    console.log(`\nSending test enrollment email via Brevo to: ${testRecipient}...`)
     try {
-      const sent = await sendWelcomeEmail({
+      const sent = await sendEnrollmentConfirmationEmail({
         name: 'Eduzyra Diagnostic Tester',
         email: testRecipient,
+        courseTitle: 'Test Course',
+        courseUrl: `${process.env.CLIENT_ORIGIN || 'http://localhost:5173'}/courses`,
       })
       if (sent) {
         console.log('✅ Test email delivered successfully via Brevo!')

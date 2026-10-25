@@ -1,41 +1,14 @@
 import { z } from 'zod'
 
-export const signupSchema = z.object({
-  name: z.string().trim().min(2, 'Name must be at least 2 characters'),
-  email: z.string().email('Invalid email address'),
-  password: z.string()
-    .min(8, 'Password must be at least 8 characters')
-    .regex(/[A-Z]/, 'Password must contain at least one uppercase letter')
-    .regex(/[0-9]/, 'Password must contain at least one number'),
-})
-
 export const loginSchema = z.object({
   email: z.string().email('Invalid email address'),
   password: z.string().min(1, 'Password is required'),
 })
 
-export const verifyOtpSchema = z.object({
-  email: z.string().email('Invalid email address'),
-  otp: z.preprocess(
-    (val) => (val == null ? '' : String(val).trim()),
-    z.string().regex(/^\d{6}$/, 'Enter the 6-digit code'),
-  ),
-})
-
-export const resendOtpSchema = z.object({
-  email: z.string().email('Invalid email address'),
-})
-
-export const forgotPasswordSchema = z.object({
-  email: z.string().email('Invalid email address'),
-})
-
-export const resetPasswordSchema = z.object({
-  token: z.string().min(1, 'Token is required'),
-  password: z.string()
-    .min(8, 'Password must be at least 8 characters')
-    .regex(/[A-Z]/, 'Password must contain at least one uppercase letter')
-    .regex(/[0-9]/, 'Password must contain at least one number'),
+// `credential` is the raw Google ID token produced by Google Identity
+// Services (the `credential` field in its success callback).
+export const googleAuthSchema = z.object({
+  credential: z.string({ error: 'Google credential is required' }).trim().min(1, 'Google credential is required'),
 })
 
 export const updateProfileSchema = z.object({
@@ -47,10 +20,7 @@ export const updateProfileSchema = z.object({
     .regex(/[A-Z]/, 'New password must contain at least one uppercase letter')
     .regex(/[0-9]/, 'New password must contain at least one number')
     .optional(),
-}).refine(
-  (data) => !data.newPassword || data.currentPassword,
-  { message: 'currentPassword is required to change password', path: ['currentPassword'] },
-)
+})
 
 export const createCourseSchema = z.object({
   slug: z.string().trim().min(3, 'Slug must be at least 3 characters'),

@@ -1,12 +1,12 @@
 # Eduzyra Backend
 
-Express + MongoDB API for the Eduzyra e-learning platform: JWT auth with email-OTP verification, course/lesson catalog, enrollments, Razorpay payments + webhooks, certificates, coupons, live classes/sessions, feedback, and notifications.
+Express + MongoDB API for the Eduzyra e-learning platform: Google Sign-In and password login, course/lesson catalog, enrollments, Razorpay payments + webhooks, certificates, coupons, live classes/sessions, feedback, and notifications.
 
 ## Stack
 
 - Node.js 20 + Express 4
 - MongoDB + Mongoose 8
-- Auth: `jsonwebtoken` + `bcryptjs`, email OTP via Brevo REST API (HTTPS)
+- Auth: `jsonwebtoken` + `bcryptjs`, Google Sign-In via `google-auth-library` (ID-token flow)
 - Payments: `razorpay` (orders + HMAC webhook verification)
 - Uploads: `multer` → `sharp` → `cloudinary`
 - Hardening: `helmet`, `express-rate-limit`, `express-mongo-sanitize`, `cors` allowlist, `zod` validation
@@ -17,6 +17,7 @@ Express + MongoDB API for the Eduzyra e-learning platform: JWT auth with email-O
 npm ci
 cp .env.example .env        # Windows PowerShell: Copy-Item .env.example .env
 # Edit .env: MONGO_URI, JWT_SECRET, CLIENT_ORIGIN, Razorpay/Brevo/Cloudinary keys
+# Optional: GOOGLE_CLIENT_ID enables "Continue with Google" (see Auth below)
 npm run seed                # courses + coupons + demo admin (admin@eduzyra.dev / ChangeMe123!)
 npm run dev                 # http://localhost:5000 (nodemon)
 ```
@@ -40,8 +41,8 @@ All vars are documented in [`.env.example`](.env.example). Never commit `.env` �
 | Server | `PORT`, `NODE_ENV` (`development`/`production`/`test`), `LOG_LEVEL` |
 | CORS | `CLIENT_ORIGIN` (comma-separated allowlist, e.g. `https://app.example.com,https://www.example.com`), `BACKEND_PUBLIC_URL` |
 | DB | `MONGO_URI` |
-| Auth | `JWT_SECRET`, `JWT_EXPIRES_IN`, `COOKIE_SECRET`, `RESET_TOKEN_TTL_MINUTES`, `LOGIN_MAX_ATTEMPTS`, `LOGIN_LOCK_MINUTES` |
-| OTP | `OTP_TTL_MINUTES`, `OTP_RESEND_COOLDOWN_SECONDS`, `OTP_MAX_ATTEMPTS` |
+| Auth | `JWT_SECRET`, `JWT_EXPIRES_IN`, `COOKIE_SECRET` |
+| Google Sign-In | `GOOGLE_CLIENT_ID` (Web client ID), optional `GOOGLE_ALLOWED_DOMAINS` |
 | Razorpay | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET`, `CURRENCY` |
 | Email (Brevo REST API) | `BREVO_API_KEY`, `EMAIL_FROM_NAME`, `EMAIL_FROM_ADDRESS` (verified sender), `ADMIN_EMAIL` — HTTPS API (port 443), works on Render free tier where SMTP ports are blocked |
 | Cloudinary | `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`, `CLOUDINARY_FOLDER` |
@@ -60,7 +61,8 @@ Generate secrets with `node -e "console.log(require('crypto').randomBytes(64).to
 | `npm test` / `npm run test:cors` | CORS preflight smoke test (no DB) |
 | `npm run test:live` | Live-session flow (mongodb-memory-server) |
 | `npm run test:certificates` | Certificate issue/verify flow (mongodb-memory-server) |
-| `npm run migrate:verify-users` | One-off: mark pre-OTP users verified |
+| `npm run test:google` | Google Sign-In + password login flow (mongodb-memory-server) |
+| `npm run migrate:cleanup-auth` | One-off: remove legacy OTP/password-reset data |
 | `npm run diag:db` | Print cert/lesson/enrollment/course diagnostics |
 | `npm run clean:courses` | **Destructive:** delete all courses + related records |
 
@@ -71,18 +73,36 @@ Base path `/api`. Protected routes send `Authorization: Bearer <token>`.
 ### Auth — `/api/auth`
 | Method | Route | Access |
 |---|---|---|
-| POST | `/signup` | Public — `{ name, email, password }`, sends OTP |
-| POST | `/verify-otp` | Public — `{ email, otp }` |
-| POST | `/resend-otp` | Public — `{ email }` (rate-limited) |
-| POST | `/login` | Public — `{ email, password }` |
+| POST | `/login` | Public — `{ email, password }` (existing password accounts) |
+| POST | `/google` | Public — `{ credential }` (Google ID token), creates or logs in the user |
 | POST | `/logout` | Logged in |
 | GET | `/me` | Logged in |
 | PATCH | `/me` | Logged in — update profile |
 | PATCH | `/me/avatar` | Logged in — avatar upload (multer+sharp+Cloudinary) |
-| POST | `/forgot-password` | Public — `{ email }` |
-| POST | `/reset-password` | Public — `{ token, password }` |
 | POST | `/contact` | Public — contact form (rate-limited, mails `ADMIN_EMAIL`) |
 | GET | `/users`, `/stats` | Admin |
+
+#### Google Sign-In
+
+`POST /api/auth/google` accepts `{ "credential": "<Google ID token>" }` and returns
+`{ user, token, isNewUser }` — the same JWT contract as `/login`. Google tokens are
+verified server-side (signature, audience, issuer, expiry, `email_verified`); the
+email is never taken from the request body.
+
+- New email → creates a `student` account with no password and returns a JWT. This is
+  the only signup path.
+- Existing email → links `googleId` and logs the user in, preserving role, password,
+  enrollments and password-login access.
+- Existing Google account → idempotent login.
+- Google accounts have no password until they set one via `PATCH /me` (no
+  `currentPassword` needed until one exists).
+
+Frontend setup (React + Vite): create an OAuth 2.0 **Web** client ID in Google Cloud
+Console, add `http://localhost:5173` + production origins as authorized JavaScript
+origins, set `VITE_GOOGLE_CLIENT_ID` to the same value as `GOOGLE_CLIENT_ID`, use
+`@react-oauth/google`, and POST the returned `credential` to this endpoint. No client
+secret or redirect URI is required. Use `GOOGLE_ALLOWED_DOMAINS` to restrict sign-ins
+to specific domains; leave it empty to accept any verified Google account.
 
 ### Courses — `/api/courses`
 | Method | Route | Access |
@@ -190,9 +210,9 @@ src/middleware/           # auth (protect/requireRole), upload, errorHandler
 src/services/             # emailService, …
 src/validators/           # zod schemas
 src/data/                 # coursesSeed.js, couponsSeed.js, seedRunner.js
-src/utils/                # logger, ApiError, asyncHandler, otp, …
+src/utils/                # logger, ApiError, asyncHandler, …
 scripts/                  # one-off ops: dev-mem, diag-db, migrations, cleanups
-tests/                    # smoke tests (CORS, live sessions, certificates)
+tests/                    # smoke tests (CORS, Google auth, live sessions, certificates)
 docs/                     # feature notes (e.g. CERTIFICATE_TESTING.md)
 ```
 
@@ -206,7 +226,7 @@ docs/                     # feature notes (e.g. CERTIFICATE_TESTING.md)
 ## Security notes
 
 - CORS is an explicit allowlist from `CLIENT_ORIGIN`; requests without `Origin` (curl/Postman/server-to-server) are allowed, unknown origins get `Not allowed by CORS`.
-- Auth endpoints are rate-limited; OTP resend/verify and contact form have tighter limits.
+- Auth endpoints are rate-limited; the contact form has a tighter limit.
 - `express-mongo-sanitize` strips `$`/`.` operators; bodies validated with `zod`; uploads size- and type-limited.
 - Never commit `.env`. See [SECURITY.md](SECURITY.md) for reporting and key-rotation guidance.
 

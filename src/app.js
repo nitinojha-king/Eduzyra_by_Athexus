@@ -97,20 +97,7 @@ const apiLimiter = rateLimit({
   skip: (req) => req.method === 'OPTIONS',
 })
 app.use('/api/auth/login', authLimiter)
-app.use('/api/auth/signup', authLimiter)
-app.use('/api/auth/forgot-password', authLimiter)
-app.use('/api/auth/verify-otp', rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 30,
-  message: { message: 'Too many verification attempts, please try again later.' },
-  skip: (req) => req.method === 'OPTIONS',
-}))
-app.use('/api/auth/resend-otp', rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: { message: 'Too many code requests, please try again later.' },
-  skip: (req) => req.method === 'OPTIONS',
-}))
+app.use('/api/auth/google', authLimiter)
 app.use('/api/auth/contact', rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,

@@ -1,340 +1,91 @@
-import crypto from 'crypto'
-import bcrypt from 'bcryptjs'
 import User from '../models/User.js'
 import Enrollment from '../models/Enrollment.js'
 import Order from '../models/Order.js'
 import Course from '../models/Course.js'
-import PendingSignup from '../models/PendingSignup.js'
 import { generateToken } from '../utils/generateToken.js'
 import { ApiError } from '../utils/ApiError.js'
 import { asyncHandler } from '../utils/asyncHandler.js'
-import { sendWelcomeEmail, sendPasswordResetEmail, sendOtpEmail } from '../services/emailService.js'
-import {
-  generateOtp,
-  hashOtp,
-  getOtpTtlMinutes,
-  getOtpCooldownSeconds,
-  getOtpMaxAttempts,
-} from '../utils/otp.js'
+import { verifyGoogleIdToken } from '../services/googleAuth.js'
 
-const devOtpCache = new Map()
-
-function storeDevOtp(email, otp, expiresAt) {
-  if (process.env.NODE_ENV === 'production') return
-  const normalizedEmail = String(email || '').toLowerCase()
-  if (!normalizedEmail) return
-  devOtpCache.set(normalizedEmail, { otp, expiresAt })
-  const ttlMs = getOtpTtlMinutes() * 60 * 1000 + 60 * 1000
-  setTimeout(() => {
-    const existing = devOtpCache.get(normalizedEmail)
-    if (existing && existing.expiresAt.getTime() === expiresAt.getTime()) {
-      devOtpCache.delete(normalizedEmail)
-    }
-  }, ttlMs)
-}
-
-function clearDevOtp(email) {
-  if (process.env.NODE_ENV === 'production') return
-  const normalizedEmail = String(email || '').toLowerCase()
-  if (!normalizedEmail) return
-  devOtpCache.delete(normalizedEmail)
-}
-
-/** How long an unconfirmed signup is retained before it is dropped entirely. */
-function pendingSignupExpiry() {
-  const hours = Number(process.env.PENDING_SIGNUP_TTL_HOURS || 24)
-  return new Date(Date.now() + hours * 60 * 60 * 1000)
-}
-
-/** Minimum seconds between two OTP mails for the same address. */
-function isWithinResendCooldown(lastSentAt) {
-  if (!lastSentAt) return false
-  const secondsSinceLast = (Date.now() - new Date(lastSentAt).getTime()) / 1000
-  return secondsSinceLast < getOtpCooldownSeconds()
-}
-
-function resendCooldownError(lastSentAt) {
-  const secondsSinceLast = (Date.now() - new Date(lastSentAt).getTime()) / 1000
-  const waitSeconds = Math.ceil(getOtpCooldownSeconds() - secondsSinceLast)
-  return new ApiError(429, `Please wait ${waitSeconds}s before requesting another code.`, 'OTP_COOLDOWN')
-}
-
-// Issues a fresh OTP onto an existing PendingSignup document. This is the
-// single point where an OTP is minted and emailed, for both signup and
-// resend. The signup stays pending — no User row exists yet, so nothing is
-// activated until the code is confirmed.
+// ── Google Sign-In ────────────────────────────────────────────────────────
 //
-// Returns the raw code only for dev-only callers; production ignores it.
-async function issueOtpForPending(pending) {
-  const otp = generateOtp()
-  const ttlMinutes = getOtpTtlMinutes()
-  pending.otpCode = hashOtp(otp)
-  pending.otpExpires = new Date(Date.now() + ttlMinutes * 60 * 1000)
-  pending.otpAttempts = 0
-  pending.otpLastSentAt = new Date()
-  pending.expiresAt = pendingSignupExpiry()
-  await pending.save()
-
-  if (process.env.NODE_ENV !== 'production') {
-    storeDevOtp(pending.email, otp, pending.otpExpires)
-  }
-
-  const sent = await sendOtpEmail({
-    name: pending.name,
-    email: pending.email,
-    otp,
-    ttlMinutes,
-  })
-
-  if (!sent) {
-    // The pending record survives, so the account can still be completed once
-    // the mail problem is fixed. Never log the code itself.
-    console.error(`[issueOtp] OTP email delivery failed for ${pending.email}. Signup remains pending.`)
-  }
-  return sent
-}
-
-// POST /api/auth/signup
-//
-// Creates NO User row. The account is staged in PendingSignup (with the
-// password already bcrypt-hashed) and is only written to `users` once the
-// emailed OTP is confirmed via POST /api/auth/verify-otp.
-//
-// Retrying signup with the same address is safe: the existing pending signup
-// gets a fresh OTP instead of a 409 clash.
-export const signup = asyncHandler(async (req, res) => {
-  const { name, email, password } = req.validatedBody || req.body
-  const normalizedEmail = email.toLowerCase()
-
-  if (await User.exists({ email: normalizedEmail })) {
-    throw new ApiError(409, 'An account with this email already exists')
-  }
-
-  const passwordHash = await bcrypt.hash(password, 10)
-
-  // Escape hatch: when AUTO_VERIFY_USERS=true the account is written
-  // immediately and no OTP is sent at all. Admin/instructor provisioning and
-  // the seed script rely on this — it must keep bypassing the OTP stage.
-  if (process.env.AUTO_VERIFY_USERS === 'true') {
-    const user = new User({ name, email: normalizedEmail, role: 'student', isVerified: true })
-    user.password = passwordHash
-    user.$locals.bypassPasswordHash = true
-    user.passwordChangedAt = new Date()
-    await user.save()
-    await PendingSignup.deleteOne({ email: normalizedEmail })
-
-    return res.status(201).json({
-      message: 'Account created successfully.',
-      user: user.toSafeObject(),
-      token: generateToken(user),
-      requiresOtp: false,
-    })
-  }
-
-  // Retrying signup re-issues the code on the existing staged record instead
-  // of failing with a 409 — the address is not yet a real account.
-  // The staged name/password are refreshed so a corrected retry actually takes effect.
-  let staged = await PendingSignup.findOne({ email: normalizedEmail })
-  if (!staged) {
-    staged = await PendingSignup.create({
-      name,
-      email: normalizedEmail,
-      passwordHash,
-      role: 'student',
-      expiresAt: pendingSignupExpiry(),
-    })
-  } else {
-    staged.name = name
-    staged.passwordHash = passwordHash
-  }
-
-  const otpSent = await issueOtpForPending(staged)
-
-  res.status(201).json({
-    message: 'Account created. Enter the verification code sent to your email.',
-    email: normalizedEmail,
-    requiresOtp: true,
-    emailSent: otpSent,
-  })
-})
-
-// POST /api/auth/verify-otp
-//
-// Confirms the code emailed at signup (or resend-otp), THEN writes the account
-// to the `users` collection and returns a login token. Before this call the
-// user's only trace is their PendingSignup document.
-export const verifyOtp = asyncHandler(async (req, res) => {
-  const { email, otp } = req.validatedBody || req.body
-  const normalizedEmail = email.toLowerCase()
-
-  const pending = await PendingSignup.findOne({ email: normalizedEmail }).select(
-    '+otpCode +otpExpires +otpAttempts +passwordHash'
-  )
-
-  if (!pending) {
-    // No staged signup. An unverified User is a pre-pending-flow account —
-    // verify that in place so those users are never stranded.
-    const legacy = await User.findOne({ email: normalizedEmail, isVerified: false }).select(
-      '+otpCode +otpExpires +otpAttempts'
+// Links a verified Google identity to an existing account. Matching is done
+// on Google's verified email because the user's stated requirement is that an
+// existing email account "just logs in" with Google. The account's password,
+// role and enrollments are left untouched.
+async function linkGoogleAccount(user, profile) {
+  if (user.googleId && user.googleId !== profile.googleId) {
+    throw new ApiError(
+      409,
+      'This email is already linked to a different Google account.',
+      'GOOGLE_ACCOUNT_CONFLICT',
     )
-    if (legacy) return verifyLegacyUser(legacy, otp, res)
-    throw new ApiError(400, 'Invalid or expired code')
   }
 
-  if (!pending.otpCode || !pending.otpExpires || pending.otpExpires < new Date()) {
-    throw new ApiError(400, 'This code has expired. Request a new one.', 'OTP_EXPIRED')
-  }
+  user.googleId = profile.googleId
+  if (!user.avatar && profile.picture) user.avatar = profile.picture
 
-  if (pending.otpAttempts >= getOtpMaxAttempts()) {
-    throw new ApiError(429, 'Too many incorrect attempts. Request a new code.', 'OTP_LOCKED')
-  }
-
-  if (hashOtp(otp) !== pending.otpCode) {
-    pending.otpAttempts += 1
-    await pending.save()
-    throw new ApiError(400, 'Incorrect code. Please try again.', 'OTP_INVALID')
-  }
-
-  // ── Code confirmed: this is where the account is written to the database ──
-  const user = await activatePendingSignup(pending)
-
-  res.json({ user: user.toSafeObject(), token: generateToken(user) })
-})
-
-// Creates the real User account from a confirmed pending signup and removes
-// the staging document. The bcrypt hash is copied across verbatim, so
-// `$locals.bypassPasswordHash` stops the User pre-save hook from hashing a
-// hash (which would make the account impossible to log into).
-async function activatePendingSignup(pending) {
-  // A User row can still exist for this address if it was created by an older
-  // flow while the signup was staged — adopt and verify it rather than crash
-  // on the unique email index.
-  const existing = await User.findOne({ email: pending.email })
-  if (existing) {
-    existing.isVerified = true
-    existing.otpCode = undefined
-    existing.otpExpires = undefined
-    existing.otpAttempts = 0
-    await existing.save()
-    await PendingSignup.deleteOne({ _id: pending._id })
-    return existing
-  }
-
-  const user = new User({
-    name: pending.name,
-    email: pending.email,
-    role: pending.role,
-    isVerified: true,
-  })
-  user.password = pending.passwordHash
-  user.$locals.bypassPasswordHash = true
-  // The hash was produced at signup, so the credential is as old as the
-  // signup — stamp it so pre-existing JWTs (there can be none) stay rejected.
-  user.passwordChangedAt = pending.createdAt
   await user.save()
-
-  // The account now lives in `users`; the staging doc must go.
-  await PendingSignup.deleteOne({ _id: pending._id })
-
-  if (process.env.NODE_ENV !== 'production') {
-    clearDevOtp(pending.email)
-  }
-
-  try {
-    await sendWelcomeEmail({ name: user.name, email: user.email })
-  } catch (err) {
-    console.error('[verifyOtp] Welcome email failed:', err?.message || err)
-  }
-
   return user
 }
 
-// Legacy path for accounts that predate the pending-signup flow: verify the
-// existing User document in place instead of creating a new one.
-async function verifyLegacyUser(user, otp, res) {
-  if (!user.otpCode || !user.otpExpires || user.otpExpires < new Date()) {
-    throw new ApiError(400, 'This code has expired. Request a new one.', 'OTP_EXPIRED')
-  }
-
-  if (user.otpAttempts >= getOtpMaxAttempts()) {
-    throw new ApiError(429, 'Too many incorrect attempts. Request a new code.', 'OTP_LOCKED')
-  }
-
-  if (hashOtp(otp) !== user.otpCode) {
-    user.otpAttempts += 1
-    await user.save()
-    throw new ApiError(400, 'Incorrect code. Please try again.', 'OTP_INVALID')
-  }
-
-  user.isVerified = true
-  user.otpCode = undefined
-  user.otpExpires = undefined
-  user.otpAttempts = 0
+async function createGoogleUser(profile) {
+  const user = new User({
+    name: profile.name,
+    email: profile.email,
+    role: 'student',
+    googleId: profile.googleId,
+    // No password is stored until the user explicitly sets one in profile.
+    hasPassword: false,
+    avatar: profile.picture || '',
+  })
   await user.save()
-  clearDevOtp(user.email)
-
-  res.json({ user: user.toSafeObject(), token: generateToken(user) })
+  return user
 }
 
-// POST /api/auth/resend-otp
+// POST /api/auth/google
 //
-// Response is intentionally identical whether or not the account exists /
-// is already verified, to avoid leaking account state. A short cooldown
-// (OTP_RESEND_COOLDOWN_SECONDS) prevents spamming the mailbox.
-export const resendOtp = asyncHandler(async (req, res) => {
-  const { email } = req.validatedBody || req.body
-  const normalizedEmail = email.toLowerCase()
+// Public. Body: { credential } — the ID token returned by Google Identity
+// Services on the frontend. The token is verified server-side; the email is
+// never trusted from the request body.
+//
+// Behaviour:
+//   - new email            → create a student account, return a JWT
+//   - existing email       → link googleId (if needed) and log them in
+//   - existing googleId    → log them in
+export const googleAuth = asyncHandler(async (req, res) => {
+  const { credential } = req.validatedBody || req.body
+  const profile = await verifyGoogleIdToken(credential)
 
-  const genericMessage = { message: 'If that account needs verification, a new code has been sent.' }
+  let user = await User.findOne({ googleId: profile.googleId })
+  let isNewUser = false
 
-  let pending = await PendingSignup.findOne({ email: normalizedEmail }).select('+otpLastSentAt')
+  if (!user) {
+    user = await User.findOne({ email: profile.email })
 
-  // No staged signup. Bridge any pre-pending-flow unverified User by staging
-  // them now (their password hash is already stored, so it just moves over)
-  // and then issuing a code — otherwise they could never verify.
-  if (!pending) {
-    const legacy = await User.findOne({ email: normalizedEmail, isVerified: false }).select('+password +otpLastSentAt')
-
-    // Verified account, or nothing at all: nothing to send. Say the generic
-    // thing either way so account state is never leaked.
-    if (!legacy) {
-      return res.json(genericMessage)
+    if (user) {
+      user = await linkGoogleAccount(user, profile)
+    } else {
+      try {
+        user = await createGoogleUser(profile)
+        isNewUser = true
+      } catch (err) {
+        // Two simultaneous first-time logins can race on the unique indexes.
+        // Re-read the winner instead of surfacing a 409/500.
+        if (err?.code !== 11000) throw err
+        user = await User.findOne({
+          $or: [{ googleId: profile.googleId }, { email: profile.email }],
+        })
+        if (!user) throw err
+        // linkGoogleAccount rejects a concurrent winner that is linked to a
+        // different Google identity, so the race cannot bypass the conflict check.
+        user = await linkGoogleAccount(user, profile)
+        isNewUser = false
+      }
     }
-
-    pending = await PendingSignup.create({
-      name: legacy.name,
-      email: legacy.email,
-      passwordHash: legacy.password,
-      role: legacy.role,
-      otpLastSentAt: legacy.otpLastSentAt,
-      expiresAt: pendingSignupExpiry(),
-    })
   }
 
-  if (isWithinResendCooldown(pending.otpLastSentAt)) {
-    throw resendCooldownError(pending.otpLastSentAt)
-  }
-
-  await issueOtpForPending(pending)
-  res.json(genericMessage)
-})
-
-export const getDevOtp = asyncHandler(async (req, res) => {
-  if (process.env.NODE_ENV === 'production') {
-    throw new ApiError(404, 'Not found')
-  }
-
-  const email = String(req.query.email || '').trim().toLowerCase()
-  if (!email) {
-    throw new ApiError(400, 'email query parameter is required')
-  }
-
-  const cached = devOtpCache.get(email)
-  if (!cached || !cached.otp || !cached.expiresAt || cached.expiresAt < new Date()) {
-    throw new ApiError(404, 'No valid development OTP found for this account')
-  }
-
-  res.json({ email, otp: cached.otp, expiresAt: cached.expiresAt })
+  res.json({ user: user.toSafeObject(), token: generateToken(user), isNewUser })
 })
 
 // POST /api/auth/login
@@ -351,6 +102,16 @@ export const login = asyncHandler(async (req, res) => {
   const user = await User.findOne({ email: email.toLowerCase() }).select('+password +loginAttempts +lockUntil')
   if (!user) {
     throw new ApiError(401, 'Invalid email or password')
+  }
+
+  // Google-created accounts have no password hash. Point the user at the
+  // correct flow instead of letting bcrypt compare against undefined.
+  if (!user.password) {
+    throw new ApiError(
+      401,
+      'This account uses Google Sign-In. Please continue with Google.',
+      'USE_GOOGLE_SIGN_IN',
+    )
   }
 
   // Check if the account is currently locked
@@ -387,23 +148,6 @@ export const login = asyncHandler(async (req, res) => {
     await user.save()
   }
 
-  // Admin and instructor accounts, seed demo accounts, or if AUTO_VERIFY_USERS is enabled,
-  // are auto-verified so administrative or test access is never locked out.
-  if (user.role === 'admin' || user.role === 'instructor' || user.email === 'student@eduzyra.dev' || process.env.AUTO_VERIFY_USERS === 'true') {
-    if (!user.isVerified) {
-      user.isVerified = true
-      await user.save()
-    }
-  }
-
-  // Credentials are correct, but the account's email is unverified — block
-  // the session and point the client at the OTP flow instead of the generic
-  // "Invalid email or password" message (the identity IS confirmed here, so
-  // there's no enumeration risk in saying so).
-  if (!user.isVerified) {
-    throw new ApiError(403, 'Please verify your email before logging in.', 'EMAIL_NOT_VERIFIED')
-  }
-
   const token = generateToken(user)
   res.json({ user: user.toSafeObject(), token })
 })
@@ -411,81 +155,6 @@ export const login = asyncHandler(async (req, res) => {
 // GET /api/auth/me
 export const getMe = asyncHandler(async (req, res) => {
   res.json({ user: req.user.toSafeObject() })
-})
-
-// POST /api/auth/forgot-password
-//
-// Security: This endpoint NEVER returns the raw reset token to the client.
-// The token is only stored on the User document as a SHA-256 hash
-// (resetPasswordToken) and is delivered to the user via Brevo email
-// (sendPasswordResetEmail). The response is intentionally identical whether
-// or not the email exists, to prevent account enumeration.
-export const forgotPassword = asyncHandler(async (req, res) => {
-  const { email } = req.validatedBody || req.body
-
-  const user = await User.findOne({ email: email.toLowerCase() })
-
-  if (!user) {
-    return res.json({ message: 'If that account exists, a reset link has been generated.' })
-  }
-
-  const rawToken = crypto.randomBytes(32).toString('hex')
-  user.resetPasswordToken = crypto.createHash('sha256').update(rawToken).digest('hex')
-  const ttlMinutes = Number(process.env.RESET_TOKEN_TTL_MINUTES || 30)
-  user.resetPasswordExpires = new Date(Date.now() + ttlMinutes * 60 * 1000)
-  await user.save()
-
-  // ⚠️  The raw token is intentionally NOT included in the response.
-  //     It is only delivered via email. Returning it here would allow anyone
-  //     who knows a user's email to take over their account.
-  //
-  // CLIENT_ORIGIN may be a comma-separated allowlist — the reset link uses
-  // the first entry (the canonical frontend URL).
-  const frontendBase = String(process.env.CLIENT_ORIGIN || 'http://localhost:5173')
-    .split(',')[0]
-    .trim()
-    .replace(/\/+$/, '')
-  const resetUrl = `${frontendBase}/reset-password?token=${rawToken}`
-  try {
-    await sendPasswordResetEmail({ name: user.name, email: user.email, resetUrl, ttlMinutes })
-  } catch (err) {
-    // sendPasswordResetEmail never throws (it returns false on failure), but
-    // this catch is a safety net against unexpected errors.
-    console.error('[forgotPassword] sendPasswordResetEmail threw:', err?.message || err)
-  }
-
-  // Dev fallback: if Brevo isn't configured, log the reset URL so the
-  // developer can still test the reset flow end-to-end. This is the ONLY
-  // place the raw token may appear in any output — never in an HTTP response.
-  const hasBrevoConfig = Boolean((process.env.BREVO_API_KEY || '').trim())
-  if (process.env.NODE_ENV !== 'production' && !hasBrevoConfig) {
-    console.warn('[forgotPassword] BREVO_API_KEY not configured — reset email not sent. Token expires in', ttlMinutes, 'min.')
-    console.warn('[forgotPassword] DEBUG reset URL:', resetUrl)
-  }
-
-  res.json({ message: 'If that account exists, a reset link has been generated.' })
-})
-
-// POST /api/auth/reset-password
-export const resetPassword = asyncHandler(async (req, res) => {
-  const { token, password } = req.validatedBody || req.body
-
-  const hashed = crypto.createHash('sha256').update(token).digest('hex')
-  const user = await User.findOne({
-    resetPasswordToken: hashed,
-    resetPasswordExpires: { $gt: new Date() },
-  }).select('+resetPasswordToken +resetPasswordExpires')
-
-  if (!user) {
-    throw new ApiError(400, 'Reset token is invalid or has expired')
-  }
-
-  user.password = password
-  user.resetPasswordToken = undefined
-  user.resetPasswordExpires = undefined
-  await user.save()
-
-  res.json({ message: 'Password has been reset. You can now log in.' })
 })
 
 // PATCH /api/auth/me
@@ -503,8 +172,22 @@ export const updateProfile = asyncHandler(async (req, res) => {
 
   if (newPassword) {
     const userWithPassword = await User.findById(req.user._id).select('+password')
-    const ok = await userWithPassword.comparePassword(currentPassword)
-    if (!ok) throw new ApiError(401, 'Current password is incorrect')
+
+    // Local accounts must prove the old password. Google-only accounts have
+    // no old password — they are already authenticated by their JWT, so this
+    // becomes their initial "set password" action.
+    if (userWithPassword.password) {
+      if (!currentPassword) {
+        throw new ApiError(
+          400,
+          'Current password is required to change your password.',
+          'CURRENT_PASSWORD_REQUIRED',
+        )
+      }
+      const ok = await userWithPassword.comparePassword(currentPassword)
+      if (!ok) throw new ApiError(401, 'Current password is incorrect')
+    }
+
     req.user.password = newPassword
   }
 

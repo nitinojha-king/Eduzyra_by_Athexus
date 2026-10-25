@@ -20,7 +20,7 @@ export const protect = asyncHandler(async (req, res, next) => {
   }
 
   // Select passwordChangedAt so we can check if the token was issued before
-  // the most recent password change (invalidates stolen tokens on password reset)
+  // the most recent password change (invalidates stolen tokens)
   const user = await User.findById(decoded.id).select('+passwordChangedAt')
   if (!user) {
     throw new ApiError(401, 'Not authorized — user no longer exists')

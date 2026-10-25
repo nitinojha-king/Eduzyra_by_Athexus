@@ -77,11 +77,11 @@ try {
 
   // ── 2. Fixtures ────────────────────────────────────────────────
   const stamp = Date.now()
-  const instructor = await User.create({ name: 'I', email: `ins-${stamp}@e.com`, password: 'Password1', role: 'instructor', isVerified: true })
-  const otherInstructor = await User.create({ name: 'O', email: `ins2-${stamp}@e.com`, password: 'Password1', role: 'instructor', isVerified: true })
-  const student = await User.create({ name: 'S', email: `stu-${stamp}@e.com`, password: 'Password1', role: 'student', isVerified: true })
-  const outsider = await User.create({ name: 'X', email: `out-${stamp}@e.com`, password: 'Password1', role: 'student', isVerified: true })
-  const admin = await User.create({ name: 'A', email: `adm-${stamp}@e.com`, password: 'Password1', role: 'admin', isVerified: true })
+  const instructor = await User.create({ name: 'I', email: `ins-${stamp}@e.com`, password: 'Password1', role: 'instructor' })
+  const otherInstructor = await User.create({ name: 'O', email: `ins2-${stamp}@e.com`, password: 'Password1', role: 'instructor' })
+  const student = await User.create({ name: 'S', email: `stu-${stamp}@e.com`, password: 'Password1', role: 'student' })
+  const outsider = await User.create({ name: 'X', email: `out-${stamp}@e.com`, password: 'Password1', role: 'student' })
+  const admin = await User.create({ name: 'A', email: `adm-${stamp}@e.com`, password: 'Password1', role: 'admin' })
   const course = await Course.create({
     slug: `live-test-${stamp}`, code: `EDU-${String(stamp).slice(-5)}`, title: 'Live Test Course',
     category: 'Test', level: 'Beginner', instructor: instructor._id, instructorName: 'I',
@@ -151,7 +151,7 @@ try {
   ok('other instructor gets 403 on update')
 
   // Late enrollment sees upcoming session
-  const late = await User.create({ name: 'L', email: `late-${stamp}@e.com`, password: 'Password1', role: 'student', isVerified: true })
+  const late = await User.create({ name: 'L', email: `late-${stamp}@e.com`, password: 'Password1', role: 'student' })
   await Enrollment.create({ student: late._id, course: course._id })
   const lateList = await invoke(listLiveSessions, reqWith(late, { params: { courseId: course.slug }, query: {} }))
   assert.equal(lateList.err, null)

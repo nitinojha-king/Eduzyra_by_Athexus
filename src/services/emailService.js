@@ -19,8 +19,8 @@
  *
  * Error Handling:
  * Every email function wraps the send in try/catch and logs failures via
- * console.error. Email failures NEVER throw — a failed welcome email must
- * not fail the signup response.
+ * console.error. Email failures NEVER throw — a failed notification must not
+ * fail the originating request.
  *
  * Security:
  * All user-supplied values (name, email, message, courseTitle) are
@@ -99,7 +99,7 @@ export function getSender() {
     if (process.env.NODE_ENV !== 'test') {
       console.warn(
         '[emailService] EMAIL_FROM_ADDRESS is not set — using placeholder "contact@eduzyra.com". ' +
-          'Set EMAIL_FROM_ADDRESS to a sender verified in Brevo (Senders & IP) or OTP/welcome emails will fail.',
+          'Set EMAIL_FROM_ADDRESS to a sender verified in Brevo (Senders & IP) or transactional emails will fail.',
       )
     }
     return { name, email: 'contact@eduzyra.com' }
@@ -387,72 +387,6 @@ async function send({ to, subject, html }) {
 }
 
 // ── Public email functions ────────────────────────────────────────────────
-
-/**
- * Welcome email — sent on signup.
- * @param {{name: string, email: string}} args
- */
-export async function sendWelcomeEmail({ name, email }) {
-  const html = emailWrapper(
-    'Welcome to Eduzyra',
-    `<h1 style="margin:0 0 16px;font-size:24px;color:#12213B;">Welcome, ${escapeHtml(name)}!</h1>
-     <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#4a5568;">
-       Your Eduzyra account is ready. You can now browse courses, enroll, and start learning today.
-     </p>
-     <p style="margin:24px 0;text-align:center;">
-       <a href="${process.env.CLIENT_ORIGIN || 'http://localhost:5173'}/courses" style="display:inline-block;background-color:#00C2A8;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:8px;font-weight:600;font-size:14px;">Browse Courses</a>
-     </p>
-     <p style="margin:24px 0 0;font-size:13px;color:#718096;">
-       Happy learning!<br>The Eduzyra Team
-     </p>`,
-  )
-  return send({ to: email, subject: 'Welcome to Eduzyra', html })
-}
-
-/**
- * OTP verification email — sent on signup and on resend-otp.
- * @param {{name: string, email: string, otp: string, ttlMinutes: number}} args
- */
-export async function sendOtpEmail({ name, email, otp, ttlMinutes }) {
-  const html = emailWrapper(
-    'Verify your Eduzyra account',
-    `<h1 style="margin:0 0 16px;font-size:24px;color:#12213B;">Verify your email</h1>
-     <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#4a5568;">
-       Hi ${escapeHtml(name)}, use the code below to verify your Eduzyra account and finish signing in.
-     </p>
-     <p style="margin:24px 0;text-align:center;">
-       <span style="display:inline-block;background-color:#EEF1F6;color:#12213B;padding:16px 32px;border-radius:8px;font-family:monospace;font-size:28px;font-weight:700;letter-spacing:8px;border:2px dashed #529286;">${escapeHtml(otp)}</span>
-     </p>
-     <p style="margin:16px 0 0;font-size:13px;color:#718096;">
-       This code expires in ${escapeHtml(String(ttlMinutes))} minutes. If you didn't create an Eduzyra account, you can safely ignore this email.
-     </p>`,
-  )
-  return send({ to: email, subject: `${otp} is your Eduzyra verification code`, html })
-}
-
-/**
- * Password reset email — sent on forgotPassword.
- * @param {{name: string, email: string, resetUrl: string, ttlMinutes?: number}} args
- */
-export async function sendPasswordResetEmail({ name, email, resetUrl, ttlMinutes = 30 }) {
-  const html = emailWrapper(
-    'Reset your Eduzyra password',
-    `<h1 style="margin:0 0 16px;font-size:24px;color:#12213B;">Reset your password</h1>
-     <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#4a5568;">
-       Hi ${escapeHtml(name)}, we received a request to reset your Eduzyra password. Click the button below to set a new one.
-     </p>
-     <p style="margin:24px 0;text-align:center;">
-       <a href="${resetUrl}" style="display:inline-block;background-color:#00C2A8;color:#ffffff;text-decoration:none;padding:12px 28px;border-radius:8px;font-weight:600;font-size:14px;">Reset Password</a>
-     </p>
-     <p style="margin:16px 0 0;font-size:13px;color:#718096;">
-       This link expires in ${escapeHtml(String(ttlMinutes))} minutes. If you didn't request this, you can safely ignore this email.
-     </p>
-     <p style="margin:16px 0 0;font-size:12px;color:#a0aec0;word-break:break-all;">
-       Or copy this link: ${resetUrl}
-     </p>`,
-  )
-  return send({ to: email, subject: 'Reset your Eduzyra password', html })
-}
 
 /**
  * Enrollment confirmation email — sent after successful enrollment.

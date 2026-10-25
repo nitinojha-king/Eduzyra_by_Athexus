@@ -1,7 +1,7 @@
 {
   "name": "eduzyra-backend",
   "version": "0.2.0",
-  "description": "Backend API for Eduzyra by Althexus — auth (JWT + OTP), courses, lessons, enrollment, payments (Razorpay), certificates, coupons, live classes/sessions, feedback, notifications.",
+  "description": "Backend API for Eduzyra by Althexus — auth (Google Sign-In + JWT), courses, lessons, enrollment, payments (Razorpay), certificates, coupons, live classes/sessions, feedback, notifications.",
   "license": "MIT",
   "author": "Althexus",
   "type": "module",
@@ -16,7 +16,7 @@
     "start": "node server.js",
     "start:prod": "pm2 start ecosystem.config.cjs --env production",
     "seed": "node src/data/seedRunner.js",
-    "migrate:verify-users": "node scripts/migrate-verify-existing-users.mjs",
+    "migrate:cleanup-auth": "node scripts/cleanup-auth-data.mjs",
     "diag:db": "node scripts/diag-db.mjs",
     "diag:email": "node scripts/diag-email.mjs",
     "diag:smtp": "node scripts/diag-smtp.mjs",
@@ -26,7 +26,7 @@
     "test:live": "node tests/test-live-sessions-inmem.mjs",
     "test:certificates": "node tests/test-certificate-generation-inmem.mjs",
     "test:email": "node scripts/test-email.mjs",
-    "test:otp": "node tests/test-otp-flow-inmem.mjs"
+    "test:google": "node tests/test-google-auth-inmem.mjs"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -37,6 +37,7 @@
     "express": "^4.19.2",
     "express-mongo-sanitize": "^2.2.0",
     "express-rate-limit": "^8.6.1",
+    "google-auth-library": "^10.9.1",
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.5.0",

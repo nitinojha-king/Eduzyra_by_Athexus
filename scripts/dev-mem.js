@@ -31,7 +31,6 @@ async function seed() {
       email: adminEmail,
       password: 'ChangeMe123!',
       role: 'admin',
-      isVerified: true,
     })
     log(`  Demo admin created: ${adminEmail} / ChangeMe123!`)
   }

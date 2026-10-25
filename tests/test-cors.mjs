@@ -12,9 +12,9 @@ try {
   await new Promise((resolve) => server.once('listening', resolve))
   const port = server.address().port
 
-  // 1. Check signup preflight with frontend-final.onrender.com
+  // 1. Check Google sign-in preflight with frontend-final.onrender.com
   {
-    const res = await fetch(`http://127.0.0.1:${port}/api/auth/signup`, {
+    const res = await fetch(`http://127.0.0.1:${port}/api/auth/google`, {
       method: 'OPTIONS',
       headers: {
         Origin: 'https://frontend-final.onrender.com',
@@ -28,12 +28,12 @@ try {
     assert.match(headers.get('access-control-allow-methods') || '', /POST/i)
     assert.match(headers.get('access-control-allow-headers') || '', /Content-Type/i)
     assert.equal(headers.get('access-control-allow-credentials'), 'true')
-    console.log('1. Signup preflight with frontend-final passed.')
+    console.log('1. Google sign-in preflight with frontend-final passed.')
   }
 
-  // 2. Check resend-otp preflight with fontend-final.onrender.com
+  // 2. Check contact preflight with fontend-final.onrender.com
   {
-    const res = await fetch(`http://127.0.0.1:${port}/api/auth/resend-otp`, {
+    const res = await fetch(`http://127.0.0.1:${port}/api/auth/contact`, {
       method: 'OPTIONS',
       headers: {
         Origin: 'https://fontend-final.onrender.com',
@@ -45,7 +45,7 @@ try {
     assert.equal(res.status, 204)
     assert.equal(headers.get('access-control-allow-origin'), 'https://fontend-final.onrender.com')
     assert.equal(headers.get('access-control-allow-credentials'), 'true')
-    console.log('2. Resend-otp preflight with fontend-final passed.')
+    console.log('2. Contact preflight with fontend-final passed.')
   }
 
   // 3. Check any onrender.com origin (e.g. preview deployment)
@@ -67,7 +67,7 @@ try {
 
   // 4. Check disallowed origin does NOT crash the server (returns 204 without allow-origin)
   {
-    const res = await fetch(`http://127.0.0.1:${port}/api/auth/signup`, {
+    const res = await fetch(`http://127.0.0.1:${port}/api/auth/google`, {
       method: 'OPTIONS',
       headers: {
         Origin: 'https://unauthorized-domain.com',

@@ -42,7 +42,6 @@ async function testCertificateGeneration() {
       name: 'Test Certificate Student',
       password: 'TestPassword123!',
       role: 'student',
-      isVerified: true,
     })
     console.log('✅ Created test student:')
     console.log(`   Email: ${testStudent.email}`)

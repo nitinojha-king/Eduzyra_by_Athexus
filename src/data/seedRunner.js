@@ -84,12 +84,11 @@ async function upsertUser({ email, name, role, password }) {
   if (existing) {
     existing.name = name
     existing.role = role
-    existing.isVerified = true
     if (password) existing.password = password
     await existing.save()
     return existing
   }
-  const user = await User.create({ email, name, role, password, isVerified: true })
+  const user = await User.create({ email, name, role, password })
   return user
 }
 
